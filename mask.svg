@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 500" width="400" height="500">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="500" fill="url(#bg)"/>
+  <!-- Mask icon -->
+  <g transform="translate(200,210)" fill="none" stroke="#e74c3c" stroke-width="3" stroke-linecap="round">
+    <ellipse rx="70" ry="35" fill="none"/>
+    <path d="M-70,0 Q-50,-55 0,-55 Q50,-55 70,0" fill="none"/>
+    <circle cx="-25" cy="-5" r="12" fill="#e74c3c" opacity="0.3" stroke="#e74c3c"/>
+    <circle cx="25" cy="-5" r="12" fill="#e74c3c" opacity="0.3" stroke="#e74c3c"/>
+    <circle cx="-25" cy="-5" r="5" fill="#e74c3c"/>
+    <circle cx="25" cy="-5" r="5" fill="#e74c3c"/>
+  </g>
+  <text x="200" y="290" text-anchor="middle" font-family="sans-serif" font-size="18" fill="#aaa" font-weight="600">MASKED BY MURKY</text>
+  <text x="200" y="315" text-anchor="middle" font-family="sans-serif" font-size="12" fill="#666">Click the 👁 button to reveal</text>
+</svg>

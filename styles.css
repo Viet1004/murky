@@ -1,0 +1,103 @@
+.murky-mask-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  background-color: #f5f5f5;
+  cursor: pointer;
+  transition: opacity 0.3s ease;
+  overflow: hidden;
+}
+
+.murky-mask-overlay.murky-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The media area fills the space above the caption */
+.murky-mask-overlay .murky-media {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.murky-mask-overlay .murky-mask-image {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  background-color: #ffffff;
+}
+
+.murky-toggle-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1001;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+}
+
+/* The reveal button inside the overlay is always visible */
+.murky-mask-overlay .murky-toggle-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 1;
+  z-index: 1001;
+}
+
+/* The re-mask button on the card shows on hover */
+.murky-remask-btn {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 1001;
+}
+
+.murky-card-wrapper:hover .murky-remask-btn {
+  opacity: 1;
+}
+
+.murky-card-wrapper {
+  position: relative;
+}
+
+/* --- Universal title caption (shown on every mask) --- */
+.murky-caption {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.3;
+  text-align: left;
+  box-sizing: border-box;
+  word-break: break-word;
+  pointer-events: none;
+  z-index: 1;
+}

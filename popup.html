@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 260px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 16px;
+      background: #1a1a2e;
+      color: #eee;
+    }
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    h1 span { font-size: 20px; }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #333;
+    }
+    .toggle-row label {
+      font-size: 13px;
+      color: #ccc;
+    }
+    .switch {
+      position: relative;
+      width: 42px;
+      height: 22px;
+    }
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #444;
+      border-radius: 22px;
+      transition: 0.3s;
+    }
+    .slider:before {
+      content: "";
+      position: absolute;
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: #fff;
+      border-radius: 50%;
+      transition: 0.3s;
+    }
+    input:checked + .slider {
+      background-color: #e74c3c;
+    }
+    input:checked + .slider:before {
+      transform: translateX(20px);
+    }
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: #888;
+      margin-top: 14px;
+      margin-bottom: 6px;
+      letter-spacing: 0.5px;
+    }
+    .btn {
+      width: 100%;
+      margin-top: 6px;
+      padding: 8px;
+      border: 1px solid #555;
+      border-radius: 6px;
+      background: transparent;
+      color: #ccc;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn:hover {
+      background: #333;
+    }
+    .btn-primary {
+      border-color: #e74c3c;
+      color: #e74c3c;
+    }
+    .btn-primary:hover {
+      background: rgba(231, 76, 60, 0.15);
+    }
+    .btn-danger {
+      border-color: #666;
+      color: #999;
+      font-size: 11px;
+    }
+    .event-count {
+      font-size: 11px;
+      color: #aaa;
+      text-align: center;
+      margin-top: 8px;
+    }
+    .status {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #888;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1><span>🎭</span> Murky</h1>
+
+  <div class="toggle-row">
+    <label>Mask products</label>
+    <label class="switch">
+      <input type="checkbox" id="enableToggle" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="toggle-row" style="border-bottom: none; padding-bottom: 4px;">
+    <label for="levelSelect">Mask level</label>
+  </div>
+  <select id="levelSelect" class="btn" style="appearance: auto; padding: 6px;">
+    <option value="full">Whole card</option>
+    <option value="image">Image only</option>
+    <option value="discount">Discount only</option>
+  </select>
+
+  <div class="section-title">Account</div>
+  <div id="authSection">
+    <div id="loggedOut">
+      <button class="btn btn-primary" id="browseBtn" style="font-size:11px;">Sign in / Browse collections</button>
+    </div>
+    <div id="loggedIn" style="display:none;">
+      <div style="font-size:11px;color:#aaa;margin-bottom:4px;" id="userEmail"></div>
+      <button class="btn" id="logoutBtn" style="font-size:11px;">Sign out</button>
+    </div>
+  </div>
+
+  <div class="section-title">Mask pack</div>
+  <select id="packSelect" class="btn" style="appearance: auto; padding: 6px;">
+    <option value="">Bundled (local)</option>
+  </select>
+  <button class="btn" id="reloadPacksBtn" style="margin-top: 6px; font-size: 11px;">Reload packs from server</button>
+  <input
+    type="text"
+    id="serverUrlInput"
+    class="btn"
+    style="margin-top: 6px; padding: 6px; font-family: monospace; font-size: 11px;"
+    placeholder="http://localhost:8000"
+  />
+
+  <button class="btn" id="resetBtn" style="margin-top: 10px;">Reset all revealed cards</button>
+
+  <div class="section-title">Data Collection</div>
+  <div class="event-count" id="eventCount">0 events collected</div>
+  <button class="btn btn-primary" id="exportBtn">Export data (JSON)</button>
+  <button class="btn btn-danger" id="clearDataBtn">Clear collected data</button>
+
+  <div class="status" id="status">Active on Shopee</div>
+
+  <script src="dist/popup.js"></script>
+</body>
+</html>

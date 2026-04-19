@@ -1,0 +1,23 @@
+{
+  "name": "murky",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/content.js",
+  "scripts": {
+    "build": "npm run build:content && npm run build:popup && npm run build:bg",
+    "build:content": "esbuild src/content.ts --bundle --outfile=dist/content.js --format=iife --target=es2020",
+    "build:popup": "esbuild src/popup.ts --bundle --outfile=dist/popup.js --format=iife --target=es2020",
+    "build:bg": "esbuild src/background.ts --bundle --outfile=dist/background.js --format=iife --target=es2020",
+    "watch": "npm run build && (npm run build:content -- --watch & npm run build:popup -- --watch & npm run build:bg -- --watch)",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/chrome": "^0.1.40",
+    "esbuild": "^0.28.0",
+    "typescript": "^6.0.2"
+  }
+}

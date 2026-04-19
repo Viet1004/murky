@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "Shopee Product Masker",
+  "version": "1.0.0",
+  "description": "Mask product cards on Shopee with a customizable overlay image. Toggle visibility per card or globally.",
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "externally_connectable": {
+    "matches": ["http://localhost:8000/*"]
+  },
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "https://*.onrender.com/*",
+    "https://*.supabase.co/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://shopee.vn/*", "*://shopee.sg/*", "*://shopee.co.th/*", "*://shopee.com.my/*"],
+      "js": ["dist/content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "mask.svg",
+        "icons/yao_ming.jpg",
+        "icons/lol_meme.jpg",
+        "icons/y_r_u_g.jpg"
+      ],
+      "matches": ["*://shopee.vn/*", "*://shopee.sg/*", "*://shopee.co.th/*", "*://shopee.com.my/*"]
+    }
+  ]
+}
