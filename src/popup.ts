@@ -1,209 +1,125 @@
-import { CollectionData, MaskLevel } from "./types";
 import {
-  listCollections,
-  CollectionSummary,
   getAuthToken,
   getAuthEmail,
   getServerUrl,
+  getActiveSlug,
+  listMyLicenses,
+  LicenseInfo,
 } from "./packs";
 
-const enableToggle = document.getElementById(
-  "enableToggle"
-) as HTMLInputElement;
-const levelSelect = document.getElementById(
-  "levelSelect"
-) as HTMLSelectElement;
-const packSelect = document.getElementById("packSelect") as HTMLSelectElement;
-const reloadPacksBtn = document.getElementById(
-  "reloadPacksBtn"
-) as HTMLButtonElement;
-const serverUrlInput = document.getElementById(
-  "serverUrlInput"
-) as HTMLInputElement;
-const resetBtn = document.getElementById("resetBtn") as HTMLButtonElement;
-const exportBtn = document.getElementById("exportBtn") as HTMLButtonElement;
-const clearDataBtn = document.getElementById(
-  "clearDataBtn"
-) as HTMLButtonElement;
-const status = document.getElementById("status") as HTMLDivElement;
-const eventCount = document.getElementById("eventCount") as HTMLSpanElement;
-
-// Auth elements
-const loggedOutDiv = document.getElementById("loggedOut") as HTMLDivElement;
-const loggedInDiv = document.getElementById("loggedIn") as HTMLDivElement;
+const enableToggle = document.getElementById("enableToggle") as HTMLInputElement;
+const serverUrlInput = document.getElementById("serverUrlInput") as HTMLInputElement;
 const browseBtn = document.getElementById("browseBtn") as HTMLButtonElement;
+const studioBtn = document.getElementById("studioBtn") as HTMLButtonElement;
 const logoutBtn = document.getElementById("logoutBtn") as HTMLButtonElement;
-const userEmailSpan = document.getElementById("userEmail") as HTMLDivElement;
+const userEmail = document.getElementById("userEmail") as HTMLDivElement;
+const signedIn = document.getElementById("signedIn") as HTMLDivElement;
+const statusDot = document.getElementById("statusDot") as HTMLSpanElement;
+const statusLabel = document.getElementById("statusLabel") as HTMLSpanElement;
+const statusMeta = document.getElementById("statusMeta") as HTMLDivElement;
 
 const DEFAULT_SERVER_URL = "http://localhost:8000";
 
-// ---------- Auth ----------
+// ---------- Initial state ----------
 
-async function updateAuthUI(): Promise<void> {
+chrome.storage.local.get(["murkyEnabled", "murkyServerUrl"], (result) => {
+  enableToggle.checked = result.murkyEnabled !== false;
+  serverUrlInput.value =
+    (result.murkyServerUrl as string | undefined) ?? DEFAULT_SERVER_URL;
+  refreshStatus();
+});
+
+// ---------- Status ----------
+
+function setStatus(kind: "connected" | "local" | "off", label: string, meta = ""): void {
+  statusDot.className = `dot ${kind === "off" ? "" : kind}`;
+  statusLabel.textContent = label;
+  statusMeta.textContent = meta;
+}
+
+async function refreshStatus(): Promise<void> {
   const token = await getAuthToken();
-  if (token) {
+  const signed = Boolean(token);
+
+  // Auth UI
+  if (signed) {
     const email = await getAuthEmail();
-    userEmailSpan.textContent = email ? `Signed in as ${email}` : "Signed in";
-    loggedOutDiv.style.display = "none";
-    loggedInDiv.style.display = "block";
+    userEmail.textContent = email ? `Signed in as ${email}` : "Signed in";
+    signedIn.style.display = "block";
   } else {
-    loggedOutDiv.style.display = "block";
-    loggedInDiv.style.display = "none";
+    signedIn.style.display = "none";
   }
-}
 
-browseBtn.addEventListener("click", async () => {
-  const base = await getServerUrl();
-  const url = `${base}/browse?ext=${encodeURIComponent(chrome.runtime.id)}`;
-  chrome.tabs.create({ url }, () => window.close());
-});
-
-logoutBtn.addEventListener("click", async () => {
-  chrome.storage.local.remove(["murkyAuthToken", "murkyAuthEmail"], () => {
-    status.textContent = "Signed out";
-    updateAuthUI();
-  });
-});
-
-// ---------- Load current state ----------
-
-chrome.storage.local.get(
-  [
-    "murkyEnabled",
-    "murkyCollection",
-    "murkyMaskLevel",
-    "murkyActivePack",
-    "murkyServerUrl",
-  ],
-  (result: { [key: string]: unknown }) => {
-    const enabled = result.murkyEnabled !== false;
-    enableToggle.checked = enabled;
-    status.textContent = enabled ? "Masking active" : "Masking paused";
-
-    const level = (result.murkyMaskLevel as MaskLevel | undefined) ?? "full";
-    levelSelect.value = level;
-
-    serverUrlInput.value =
-      (result.murkyServerUrl as string | undefined) ?? DEFAULT_SERVER_URL;
-
-    const collection = result.murkyCollection as CollectionData | undefined;
-    updateEventCount(collection);
-
-    const activeSlug = (result.murkyActivePack as string | undefined) ?? "";
-    refreshPackList(activeSlug);
+  if (!enableToggle.checked) {
+    setStatus("off", "Masking paused", "Toggle on to start masking products.");
+    return;
   }
-);
 
-updateAuthUI();
+  if (!signed) {
+    setStatus("local", "Local masks only", "Sign in to load community collections.");
+    return;
+  }
 
-async function refreshPackList(activeSlug: string): Promise<void> {
-  // Reset to just the local fallback option first.
-  packSelect.innerHTML = '<option value="">Bundled (local)</option>';
+  // Signed in: try to read which collection is active.
   try {
-    const collections: CollectionSummary[] = await listCollections();
-    for (const c of collections) {
-      const opt = document.createElement("option");
-      opt.value = c.slug;
-      opt.textContent = `${c.display_name} (${c.theme_count} themes)`;
-      packSelect.appendChild(opt);
+    const [activeSlug, licenses] = await Promise.all([
+      getActiveSlug(),
+      listMyLicenses().catch(() => [] as LicenseInfo[]),
+    ]);
+    const active = licenses.find((l) => l.collection_slug === activeSlug);
+    if (active) {
+      setStatus("connected", "Connected to server", `Loaded: ${active.collection_name}`);
+    } else if (licenses.length > 0) {
+      setStatus("connected", "Connected to server", "Pick a collection from Browse.");
+    } else {
+      setStatus("connected", "Connected to server", "No collections yet — browse to get one.");
     }
-    packSelect.value = activeSlug;
-  } catch (e) {
-    console.warn("[murky popup] failed to list collections", e);
-    status.textContent = "Server unreachable";
+  } catch {
+    setStatus("local", "Server unreachable", "Falling back to bundled local masks.");
   }
 }
 
-packSelect.addEventListener("change", () => {
-  const slug = packSelect.value;
-  chrome.storage.local.set({ murkyActivePack: slug || null }, () => {
+// ---------- Events ----------
+
+enableToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ murkyEnabled: enableToggle.checked }, () => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs[0]?.id;
       if (tabId !== undefined) chrome.tabs.reload(tabId);
     });
+    refreshStatus();
   });
-  status.textContent = slug ? `Pack: ${slug}` : "Pack: bundled";
-});
-
-reloadPacksBtn.addEventListener("click", () => {
-  const activeSlug = (packSelect.value as string | undefined) ?? "";
-  refreshPackList(activeSlug);
 });
 
 serverUrlInput.addEventListener("change", () => {
   const url = serverUrlInput.value.trim() || DEFAULT_SERVER_URL;
-  chrome.storage.local.set({ murkyServerUrl: url }, () => {
-    refreshPackList(packSelect.value);
-  });
-  status.textContent = `Server: ${url}`;
+  chrome.storage.local.set({ murkyServerUrl: url }, refreshStatus);
 });
 
-levelSelect.addEventListener("change", () => {
-  const level = levelSelect.value as MaskLevel;
-  chrome.storage.local.set({ murkyMaskLevel: level });
-  status.textContent = `Mask level: ${level}`;
+browseBtn.addEventListener("click", async () => {
+  const base = await getServerUrl();
+  chrome.tabs.create(
+    { url: `${base}/browse?ext=${encodeURIComponent(chrome.runtime.id)}` },
+    () => window.close()
+  );
 });
 
-function updateEventCount(collection?: CollectionData): void {
-  const count = collection?.events.length ?? 0;
-  eventCount.textContent = `${count} events collected`;
-}
-
-enableToggle.addEventListener("change", () => {
-  const enabled = enableToggle.checked;
-  status.textContent = enabled ? "Enabling..." : "Disabling...";
-  chrome.storage.local.set({ murkyEnabled: enabled }, () => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tabId = tabs[0]?.id;
-      if (tabId !== undefined) chrome.tabs.reload(tabId);
-    });
-  });
+studioBtn.addEventListener("click", async () => {
+  const base = await getServerUrl();
+  chrome.tabs.create(
+    { url: `${base}/studio?ext=${encodeURIComponent(chrome.runtime.id)}` },
+    () => window.close()
+  );
 });
 
-resetBtn.addEventListener("click", () => {
-  chrome.storage.local.set({ murkyRevealed: [] });
-  status.textContent = "All cards re-masked";
-
-  setTimeout(() => {
-    status.textContent = enableToggle.checked
-      ? "Masking active"
-      : "Masking paused";
-  }, 1500);
-});
-
-exportBtn.addEventListener("click", () => {
-  chrome.storage.local.get(["murkyCollection"], (result) => {
-    const collection = result.murkyCollection as CollectionData | undefined;
-    const data = collection ?? { events: [], sessionCount: 0 };
-
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `murky-data-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    status.textContent = `Exported ${data.events.length} events`;
-    setTimeout(() => {
-      status.textContent = enableToggle.checked
-        ? "Masking active"
-        : "Masking paused";
-    }, 2000);
-  });
-});
-
-clearDataBtn.addEventListener("click", () => {
-  chrome.storage.local.set({
-    murkyCollection: { events: [], sessionCount: 0 },
-  });
-  updateEventCount();
-  status.textContent = "Data cleared";
-  setTimeout(() => {
-    status.textContent = enableToggle.checked
-      ? "Masking active"
-      : "Masking paused";
-  }, 1500);
+logoutBtn.addEventListener("click", () => {
+  chrome.storage.local.remove(
+    [
+      "murkyAuthToken",
+      "murkyAuthEmail",
+      "murkyAuthRefreshToken",
+      "murkyAuthExpiresAt",
+    ],
+    refreshStatus
+  );
 });

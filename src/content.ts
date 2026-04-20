@@ -1,4 +1,4 @@
-import { ProductId, MaskLevel } from "./types";
+import { ProductId } from "./types";
 import { pickAdapter, SiteAdapter } from "./adapters";
 import {
   startCollector,
@@ -83,18 +83,15 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
   const registry = buildRegistry(collection);
 
   // --- State ---
-  let maskLevel: MaskLevel = "full";
   let revealedCards = new Set<string>();
   const processedCards = new WeakSet<HTMLElement>();
-  // Regular Set holds strong refs; prune detached nodes on each remount.
   const maskedCards: Set<HTMLElement> = new Set();
   const cardMasks = new WeakMap<HTMLElement, Mask>();
 
   // --- Storage init ---
   chrome.storage.local.get(
-    ["murkyRevealed", "murkyMaskLevel"],
+    ["murkyRevealed"],
     (result: { [key: string]: unknown }) => {
-      maskLevel = (result.murkyMaskLevel as MaskLevel | undefined) ?? "full";
       revealedCards = new Set(
         (result.murkyRevealed as string[] | undefined) ?? []
       );
@@ -108,10 +105,6 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
         (changes.murkyRevealed.newValue as string[]) ?? []
       );
       updateAllMasks();
-    }
-    if (changes.murkyMaskLevel) {
-      maskLevel = (changes.murkyMaskLevel.newValue as MaskLevel) ?? "full";
-      remountAllCards();
     }
   });
 
@@ -150,19 +143,6 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
     return Array.from(cards);
   }
 
-  // --- Mask target selection ---
-  function pickMaskTarget(card: HTMLElement): HTMLElement | null {
-    switch (maskLevel) {
-      case "image":
-        return adapter.findImageElement(card) ?? card;
-      case "discount":
-        return adapter.findDiscountElement(card);
-      case "full":
-      default:
-        return card;
-    }
-  }
-
   // --- Mounting masks via the registry ---
   function attachMaskToCard(card: HTMLElement, cardId: string | null): void {
     if (processedCards.has(card)) return;
@@ -184,9 +164,6 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
     }
 
     if (!wasMasked) return;
-
-    const target = pickMaskTarget(card);
-    if (!target) return;
 
     const ctx: MaskContext = {
       productId,
@@ -223,7 +200,7 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
 
     const factory = registry.pick(ctx);
     const mask = factory.create(ctx);
-    mask.mount(target, ctx);
+    mask.mount(card, ctx);
     maskedCards.add(card);
 
     const isAlreadyRevealed = cardId !== null && revealedCards.has(cardId);
@@ -263,88 +240,6 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
       const cardId = getCardId(card);
       attachMaskToCard(card, cardId);
     }
-  }
-
-  /**
-   * Tear down all existing masks and re-attach them using the current
-   * maskLevel. Called when the user changes the level in the popup.
-   */
-  function remountAllCards(): void {
-    const toRemount: HTMLElement[] = [];
-
-    for (const card of maskedCards) {
-      if (!card.isConnected) {
-        maskedCards.delete(card);
-        continue;
-      }
-      const mask = cardMasks.get(card);
-      if (mask) {
-        mask.unmount();
-        cardMasks.delete(card);
-      }
-      toRemount.push(card);
-    }
-    maskedCards.clear();
-
-    for (const card of toRemount) {
-      forceAttachMask(card);
-    }
-  }
-
-  /**
-   * Re-attach a mask to a card that was previously masked. Bypasses
-   * the random coin flip because we know this card should be masked.
-   */
-  function forceAttachMask(card: HTMLElement): void {
-    const cardId = getCardId(card);
-    const productId: ProductId | null = getProductId(card);
-    const features = adapter.scrapeFeatures(card);
-
-    const target = pickMaskTarget(card);
-    if (!target) return;
-
-    const ctx: MaskContext = {
-      productId,
-      features,
-      onReveal: () => {
-        if (cardId) {
-          revealedCards.add(cardId);
-          chrome.storage.local.set({
-            murkyRevealed: Array.from(revealedCards),
-          });
-        }
-        if (productId) recordUnmask(productId.itemId);
-      },
-      onRemask: () => {
-        if (cardId) {
-          revealedCards.delete(cardId);
-          chrome.storage.local.set({
-            murkyRevealed: Array.from(revealedCards),
-          });
-        }
-        if (productId) recordRemask(productId.itemId);
-      },
-      onInteraction: (label, payload) => {
-        if (productId) {
-          console.debug(
-            "[murky] interaction",
-            label,
-            productId.itemId,
-            payload
-          );
-        }
-      },
-    };
-
-    const factory = registry.pick(ctx);
-    const mask = factory.create(ctx);
-    mask.mount(target, ctx);
-
-    const isRevealed = cardId !== null && revealedCards.has(cardId);
-    mask.setVisible(!isRevealed);
-
-    cardMasks.set(card, mask);
-    maskedCards.add(card);
   }
 
   // --- Initial scan ---

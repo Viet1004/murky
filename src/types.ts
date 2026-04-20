@@ -37,18 +37,9 @@ export interface CollectionData {
   sessionCount: number;
 }
 
-/**
- * Granularity of masking:
- *  - "full"     → covers the whole product card
- *  - "image"    → covers only the product image
- *  - "discount" → covers only the discount badge
- */
-export type MaskLevel = "full" | "image" | "discount";
-
 /** Storage schema */
 export interface MurkyStorage {
   murkyEnabled: boolean;
   murkyRevealed: string[];
   murkyCollection: CollectionData;
-  murkyMaskLevel: MaskLevel;
 }
