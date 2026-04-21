@@ -181,6 +181,20 @@
     </div>
   </div>
 
+  <div class="card" id="behaviorCard" style="margin-top: 12px;">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap: 8px;">
+      <div>
+        <div style="font-size:13px; font-weight:500;">Collect behavioral data</div>
+        <div class="meta" style="margin-top:2px;">Off by default. Sends impressions and clicks to your server to train the impulsive-mode detector.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="behaviorToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <button class="btn" id="clearBehaviorBtn" style="margin-top: 10px;">Clear my behavior data</button>
+  </div>
+
   <footer>
     <div class="field-label">Server</div>
     <input type="text" id="serverUrlInput" class="server" placeholder="http://localhost:8000" />

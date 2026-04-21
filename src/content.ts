@@ -8,6 +8,13 @@ import {
   recordClick,
 } from "./collector";
 import {
+  initBehaviorCollector,
+  recordBehaviorImpression,
+  recordBehaviorUnmask,
+  recordBehaviorRemask,
+  recordBehaviorClick,
+} from "./behavior";
+import {
   Mask,
   MaskContext,
   MaskRegistry,
@@ -109,6 +116,7 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
   });
 
   startCollector(adapter.siteId);
+  void initBehaviorCollector(adapter.siteId);
 
   // --- Card detection ---
   function getCardId(card: HTMLElement): string | null {
@@ -161,6 +169,10 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
 
     if (productId) {
       recordImpression(productId, features, wasMasked);
+      recordBehaviorImpression(
+        `${adapter.siteId}:${productId.itemId}`,
+        wasMasked
+      );
     }
 
     if (!wasMasked) return;
@@ -175,7 +187,10 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
             murkyRevealed: Array.from(revealedCards),
           });
         }
-        if (productId) recordUnmask(productId.itemId);
+        if (productId) {
+          recordUnmask(productId.itemId);
+          recordBehaviorUnmask(`${adapter.siteId}:${productId.itemId}`);
+        }
       },
       onRemask: () => {
         if (cardId) {
@@ -184,7 +199,10 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
             murkyRevealed: Array.from(revealedCards),
           });
         }
-        if (productId) recordRemask(productId.itemId);
+        if (productId) {
+          recordRemask(productId.itemId);
+          recordBehaviorRemask(`${adapter.siteId}:${productId.itemId}`);
+        }
       },
       onInteraction: (label, payload) => {
         if (productId) {
@@ -214,6 +232,7 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
     if (productLink && productId) {
       productLink.addEventListener("click", () => {
         recordClick(productId.itemId);
+        recordBehaviorClick(`${adapter.siteId}:${productId.itemId}`, wasMasked);
       });
     }
   }

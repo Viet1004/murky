@@ -17,17 +17,23 @@ const signedIn = document.getElementById("signedIn") as HTMLDivElement;
 const statusDot = document.getElementById("statusDot") as HTMLSpanElement;
 const statusLabel = document.getElementById("statusLabel") as HTMLSpanElement;
 const statusMeta = document.getElementById("statusMeta") as HTMLDivElement;
+const behaviorToggle = document.getElementById("behaviorToggle") as HTMLInputElement;
+const clearBehaviorBtn = document.getElementById("clearBehaviorBtn") as HTMLButtonElement;
 
 const DEFAULT_SERVER_URL = "http://localhost:8000";
 
 // ---------- Initial state ----------
 
-chrome.storage.local.get(["murkyEnabled", "murkyServerUrl"], (result) => {
-  enableToggle.checked = result.murkyEnabled !== false;
-  serverUrlInput.value =
-    (result.murkyServerUrl as string | undefined) ?? DEFAULT_SERVER_URL;
-  refreshStatus();
-});
+chrome.storage.local.get(
+  ["murkyEnabled", "murkyServerUrl", "murkyBehaviorEnabled"],
+  (result) => {
+    enableToggle.checked = result.murkyEnabled !== false;
+    serverUrlInput.value =
+      (result.murkyServerUrl as string | undefined) ?? DEFAULT_SERVER_URL;
+    behaviorToggle.checked = result.murkyBehaviorEnabled === true;
+    refreshStatus();
+  }
+);
 
 // ---------- Status ----------
 
@@ -122,4 +128,62 @@ logoutBtn.addEventListener("click", () => {
     ],
     refreshStatus
   );
+});
+
+// ---------- Behavior collection toggle ----------
+
+behaviorToggle.addEventListener("change", () => {
+  chrome.storage.local.set({ murkyBehaviorEnabled: behaviorToggle.checked });
+});
+
+clearBehaviorBtn.addEventListener("click", async () => {
+  const confirmed = window.confirm(
+    "Delete all collected behavior data from the server? This cannot be undone."
+  );
+  if (!confirmed) return;
+
+  const base = (serverUrlInput.value.trim() || DEFAULT_SERVER_URL).replace(
+    /\/$/,
+    ""
+  );
+  const { murkyAnonId } = await new Promise<{ murkyAnonId?: string }>(
+    (resolve) => {
+      chrome.storage.local.get(["murkyAnonId"], (r) =>
+        resolve(r as { murkyAnonId?: string })
+      );
+    }
+  );
+
+  clearBehaviorBtn.disabled = true;
+  clearBehaviorBtn.textContent = "Clearing…";
+  try {
+    await new Promise<void>((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "fetch-post",
+          url: `${base}/behavior/clear`,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ anon_id: murkyAnonId ?? null }),
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (!response?.ok) {
+            reject(new Error(response?.error ?? "clear failed"));
+          } else {
+            resolve();
+          }
+        }
+      );
+    });
+    clearBehaviorBtn.textContent = "Cleared ✓";
+  } catch (e) {
+    console.warn("[murky] clear failed", e);
+    clearBehaviorBtn.textContent = "Failed — try again";
+  } finally {
+    setTimeout(() => {
+      clearBehaviorBtn.disabled = false;
+      clearBehaviorBtn.textContent = "Clear my behavior data";
+    }, 1500);
+  }
 });
