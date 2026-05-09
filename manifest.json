@@ -1,20 +1,34 @@
 {
   "manifest_version": 3,
-  "name": "Shopee Product Masker",
-  "version": "1.0.0",
-  "description": "Mask product cards on Shopee with a customizable overlay image. Toggle visibility per card or globally.",
+  "name": "Murky",
+  "version": "1.1.0",
+  "description": "Mask elements on any website. Click to pick a repeating element (product card, video tile, post), then Murky overlays it on every visit.",
   "background": {
     "service_worker": "dist/background.js"
   },
   "externally_connectable": {
-    "matches": ["http://localhost:8000/*"]
+    "matches": ["http://localhost:5173/*", "http://localhost:8000/*"]
   },
-  "permissions": ["storage", "activeTab"],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "webNavigation"
+  ],
   "host_permissions": [
+    "http://localhost:5173/*",
     "http://localhost:8000/*",
     "https://*.onrender.com/*",
-    "https://*.supabase.co/*"
+    "https://*.supabase.co/*",
+    "https://huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*",
+    "https://cdn.jsdelivr.net/*",
+    "<all_urls>"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "content_scripts": [
     {
       "matches": ["*://shopee.vn/*", "*://shopee.sg/*", "*://shopee.co.th/*", "*://shopee.com.my/*"],
@@ -42,9 +56,13 @@
         "mask.svg",
         "icons/yao_ming.jpg",
         "icons/lol_meme.jpg",
-        "icons/y_r_u_g.jpg"
+        "icons/y_r_u_g.jpg",
+        "styles.css",
+        "dist/content.js",
+        "dist/picker.js",
+        "dist/regret.js"
       ],
-      "matches": ["*://shopee.vn/*", "*://shopee.sg/*", "*://shopee.co.th/*", "*://shopee.com.my/*"]
+      "matches": ["<all_urls>"]
     }
   ]
 }

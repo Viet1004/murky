@@ -152,6 +152,95 @@
       outline: none;
     }
     input.server:focus { border-color: var(--brand); }
+
+    /* Focus card (scoring model + prompt) */
+    textarea.focus-prompt,
+    select.focus-model {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--cream-dark);
+      font-family: inherit;
+      font-size: 12px;
+      color: var(--ink);
+      background: #fff;
+      outline: none;
+      resize: none;
+    }
+    textarea.focus-prompt { min-height: 60px; line-height: 1.4; }
+    textarea.focus-prompt:focus,
+    select.focus-model:focus { border-color: var(--brand); }
+    .focus-row + .focus-row { margin-top: 8px; }
+
+    /* Section headings (Local / Online) */
+    .section-heading {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 18px 0 6px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      color: var(--ink-muted);
+    }
+    .section-heading::before,
+    .section-heading::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--cream-dark);
+    }
+
+    /* Per-feature opt-in toggle row */
+    .toggle-row {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 8px;
+    }
+    .toggle-row .toggle-text { flex: 1; min-width: 0; }
+    .toggle-row .toggle-text > div:first-child {
+      font-size: 13px; font-weight: 500;
+    }
+    .disclosure-toggle {
+      background: none; border: none; padding: 0;
+      color: var(--brand);
+      font-size: 11px; cursor: pointer; margin-top: 6px;
+      font-family: inherit;
+    }
+    .disclosure-toggle:hover { text-decoration: underline; }
+    .disclosure-body {
+      display: none;
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: var(--cream);
+      border: 1px solid var(--cream-dark);
+      border-radius: 8px;
+      font-size: 11px;
+      color: var(--ink-muted);
+      line-height: 1.5;
+    }
+    .disclosure-body code, .disclosure-body pre {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 10.5px;
+      color: var(--ink);
+    }
+    .disclosure-body pre {
+      margin: 6px 0 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .gated-note {
+      margin-top: 8px;
+      padding: 6px 8px;
+      background: var(--brand-50);
+      border: 1px solid #f5d6c1;
+      border-radius: 6px;
+      font-size: 11px;
+      color: var(--brand-700);
+    }
+    .toggle-row input:disabled + .slider {
+      opacity: 0.4; cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -171,33 +260,171 @@
     <div class="meta" id="statusMeta"></div>
   </div>
 
-  <button class="btn btn-primary" id="browseBtn">Browse collections</button>
+  <!-- ============================================================ -->
+  <!-- LOCAL MASKING — always on, never touches the network         -->
+  <!-- ============================================================ -->
+  <div class="section-heading">Local masking</div>
 
-  <div id="signedIn" style="display:none;">
-    <div class="email" id="userEmail"></div>
+  <div class="card" id="pickerCard">
+    <div style="font-size:13px; font-weight:500; margin-bottom: 4px;">Mask anything on this page</div>
+    <div class="meta" style="margin-bottom: 10px;">Click to pick a card, tile, or post. Murky will mask similar elements on this site every visit.</div>
+    <div id="pickerStatus" class="meta" style="margin-bottom: 8px; display: none;"></div>
     <div class="row">
-      <button class="btn" id="studioBtn">Open Studio</button>
-      <button class="btn" id="logoutBtn">Sign out</button>
+      <button class="btn" id="pickElementBtn">Pick element</button>
+      <button class="btn" id="forgetSiteBtn" style="display: none;">Forget</button>
     </div>
   </div>
 
-  <div class="card" id="behaviorCard" style="margin-top: 12px;">
-    <div style="display:flex; align-items:center; justify-content:space-between; gap: 8px;">
+  <div class="card" id="savedSitesCard" style="margin-top: 12px;">
+    <button id="savedSitesHeader" type="button" style="display:flex; align-items:center; justify-content:space-between; width:100%; background:none; border:none; padding:0; cursor:pointer; color:var(--ink); font-family:inherit; text-align:left;">
       <div>
-        <div style="font-size:13px; font-weight:500;">Collect behavioral data</div>
-        <div class="meta" style="margin-top:2px;">Off by default. Sends impressions and clicks to your server to train the impulsive-mode detector.</div>
+        <div style="font-size:13px; font-weight:500;">Saved sites</div>
+        <div class="meta" id="savedSitesSummary" style="margin-top:2px;">No sites saved yet.</div>
+      </div>
+      <span id="savedSitesChevron" style="font-size:12px; color:var(--ink-muted); margin-left:8px;">▸</span>
+    </button>
+    <div id="savedSitesList" style="display:none; margin-top:10px;"></div>
+  </div>
+
+  <div class="card" id="focusCard" style="margin-top: 12px;">
+    <div class="focus-row">
+      <div class="field-label">Focus prompt</div>
+      <textarea
+        id="focusPromptInput"
+        class="focus-prompt"
+        placeholder="What are you shopping for? e.g. minimalist clothing, kitchen tools…"
+      ></textarea>
+    </div>
+    <div class="focus-row">
+      <div class="field-label">Local scoring model</div>
+      <select id="scorerSelect" class="focus-model">
+        <option value="random">Random (50/50 baseline)</option>
+        <option value="heuristic">Heuristic (keyword + budget)</option>
+        <option value="embedding-minilm">MiniLM embedding (runs in your browser)</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- ONLINE ADD-ONS — sign in + per-feature opt-in                -->
+  <!-- ============================================================ -->
+  <div class="section-heading">Online add-ons</div>
+
+  <div class="card" id="accountCard">
+    <div id="signedOut">
+      <div style="font-size:13px; font-weight:500; margin-bottom:4px;">Sign in to unlock more</div>
+      <div class="meta" style="margin-bottom:10px;">Browse curated mask collections, sync your masks across devices, and turn on optional online filters.</div>
+      <button class="btn btn-primary" id="browseBtn">Sign in &amp; browse collections</button>
+    </div>
+    <div id="signedIn" style="display:none;">
+      <div class="email" id="userEmail"></div>
+      <div class="row">
+        <button class="btn btn-primary" id="browseSignedInBtn">Browse collections</button>
+        <button class="btn" id="studioBtn">Studio</button>
+      </div>
+      <button class="btn" id="logoutBtn" style="margin-top:6px;">Sign out</button>
+    </div>
+  </div>
+
+  <!-- Sync masks across devices ---------------------------------- -->
+  <div class="card" id="syncCard" style="margin-top: 12px;">
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <div>Sync masks across devices</div>
+        <div class="meta" style="margin-top:2px;">Off by default. Saves your picked sites and focus prompt to your account so they reappear on other browsers.</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="syncToggle" disabled>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <button class="disclosure-toggle" data-target="syncDisclosure">What gets sent?</button>
+    <div class="disclosure-body" id="syncDisclosure">
+      When sync is on, Murky uploads to your account:
+      <pre>user_site_selectors:
+  origin            "https://www.youtube.com"
+  card_selector     ".ytm-shorts-lockup-view-model-v2"
+  href/image/title/price_selector  (optional)
+  label             "YouTube Shorts"
+  saved_at, updated_at
+
+user_preferences:
+  focus_prompt      "minimalist kitchen tools"
+  scorer_id         "heuristic"
+  updated_at</pre>
+      We do <strong>not</strong> send page contents, your browsing history, or anything from sites you haven't picked. Turn off any time — uploads stop immediately. Use "Delete sync data" below to also wipe what's on the server.
+      <div style="margin-top:8px;">
+        <button class="btn" id="clearSyncBtn" style="font-size:11px; padding:4px 10px; width:auto;">Delete sync data</button>
+      </div>
+    </div>
+    <div class="gated-note" id="syncGatedNote" style="display:none;">Sign in to enable sync.</div>
+  </div>
+
+  <!-- Powerful online filter (opt-in, COMING SOON) ---------------- -->
+  <div class="card" id="premiumFilterCard" style="margin-top: 12px;">
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <div>Powerful online filter <span style="font-size:10px; color:var(--ink-muted); font-weight:400;">— coming soon</span></div>
+        <div class="meta" style="margin-top:2px;">Off by default. Sends each scored product to a server-side model that's larger than what runs locally. Only useful for harder filtering tasks (semantic / cross-language).</div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="premiumFilterToggle" disabled>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <button class="disclosure-toggle" data-target="premiumDisclosure">What gets sent?</button>
+    <div class="disclosure-body" id="premiumDisclosure">
+      When the online filter is on, each product Murky scores sends:
+      <pre>scored_product:
+  origin            "https://shopee.vn"
+  product_title     "Cotton T-shirt White M"
+  product_price_vnd 199000          (when available)
+  image_url         (the product image URL)
+  focus_prompt      (your current focus prompt)
+  scored_at         (timestamp)</pre>
+      We do <strong>not</strong> send: page contents outside what you mask, browsing history, other tabs, or your account email. Off by default. When you turn it off, no further uploads happen. Use "Delete filter data" to wipe what's already on the server.
+      <div style="margin-top:8px;">
+        <button class="btn" id="clearPremiumBtn" style="font-size:11px; padding:4px 10px; width:auto;" disabled>Delete filter data</button>
+      </div>
+    </div>
+    <div class="gated-note" id="premiumGatedNote" style="display:none;">Sign in to enable the online filter.</div>
+  </div>
+
+  <!-- Behavior telemetry (existing, opt-in) ----------------------- -->
+  <div class="card" id="behaviorCard" style="margin-top: 12px;">
+    <div class="toggle-row">
+      <div class="toggle-text">
+        <div>Collect behavioral data</div>
+        <div class="meta" style="margin-top:2px;">Off by default. Sends impressions, clicks, and (optional) regret responses to train the impulsive-mode detector.</div>
       </div>
       <label class="switch">
         <input type="checkbox" id="behaviorToggle">
         <span class="slider"></span>
       </label>
     </div>
-    <button class="btn" id="clearBehaviorBtn" style="margin-top: 10px;">Clear my behavior data</button>
+    <button class="disclosure-toggle" data-target="behaviorDisclosure">What gets sent?</button>
+    <div class="disclosure-body" id="behaviorDisclosure">
+      When behavioral collection is on, Murky sends batched events:
+      <pre>events:
+  type              "impression" | "unmask" | "remask" | "click" | "page_view"
+  product_key       "shopee:12345"
+  was_masked        true|false
+  latency_ms        time to first interaction
+  page              {url, page_type, query, category_path}
+  client_ts         timestamp
+
+regret responses (only after a gentle prompt):
+  trace_id, product_key, response, dwell_ms</pre>
+      We do <strong>not</strong> link this to your account email or to your Murky-server identity beyond an anonymous install id. Wipe anytime with the button below.
+      <div style="margin-top:8px;">
+        <button class="btn" id="clearBehaviorBtn" style="font-size:11px; padding:4px 10px; width:auto;">Delete behavior data</button>
+      </div>
+    </div>
   </div>
 
   <footer>
     <div class="field-label">Server</div>
-    <input type="text" id="serverUrlInput" class="server" placeholder="http://localhost:8000" />
+    <input type="text" id="serverUrlInput" class="server" placeholder="http://localhost:5173" />
   </footer>
 
   <script src="dist/popup.js"></script>

@@ -229,7 +229,7 @@ function storageSet(items: Record<string, unknown>): Promise<void> {
 
 async function getServerUrl(): Promise<string> {
   const result = await storageGet<{ murkyServerUrl?: string }>(["murkyServerUrl"]);
-  return (result.murkyServerUrl ?? "http://localhost:8000").replace(/\/$/, "");
+  return (result.murkyServerUrl ?? "http://localhost:5173").replace(/\/$/, "");
 }
 
 function bgPost(url: string, body: string): Promise<unknown> {

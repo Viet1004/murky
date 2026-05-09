@@ -1,5 +1,7 @@
 # Murky — Chrome Extension
 
+> **Cross-repo docs:** the parent `murky-project/` (sibling folder one level up) holds project-wide documentation. For architecture, glossary, and contributor guides that span this repo and `murky-server/`, read [`../murky-project/AGENTS.md`](../murky-project/AGENTS.md) first. This file (`CLAUDE.md`) covers extension internals only.
+
 Chrome Manifest V3 extension that masks product images on e-commerce sites with layered image overlays. Users click through layers to reveal the product underneath.
 
 ## Build & Dev

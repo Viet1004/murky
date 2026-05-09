@@ -58,7 +58,7 @@ export interface PackSummary {
 
 // ---------- Storage keys ----------
 
-const DEFAULT_SERVER_URL = "http://localhost:8000";
+const DEFAULT_SERVER_URL = "http://localhost:5173";
 const CACHE_KEY = "murkyCollectionCache";
 const SERVER_URL_KEY = "murkyServerUrl";
 const ACTIVE_PACK_KEY = "murkyActivePack"; // kept same key for compat

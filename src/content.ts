@@ -24,33 +24,47 @@ import {
   ImageStackMaskFactory,
 } from "./masks";
 import { loadActiveCollection, CollectionDetail } from "./packs";
+import {
+  getActiveScorer,
+  getProfile,
+  getScorerConfig,
+  onModelReady,
+  Scorer,
+  UserProfile,
+} from "./scoring";
 
-// --- Pick the adapter for the current site ---
-const adapter: SiteAdapter | null = pickAdapter(window.location.hostname);
+// --- Pick the adapter for the current site (async — may consult per-origin store) ---
+void (async () => {
+  const adapter: SiteAdapter | null = await pickAdapter(
+    window.location.hostname,
+    window.location.origin
+  );
+  if (!adapter) {
+    console.debug("[murky] no adapter for", window.location.hostname);
+    return;
+  }
 
-if (!adapter) {
-  console.debug("[murky] no adapter for", window.location.hostname);
-} else {
   // Gate on the global enable flag before doing anything. If the user has
   // disabled the extension, bail out entirely so the page renders untouched.
-  // The popup toggles this flag and then reloads the tab, so we don't need
-  // to react to changes at runtime.
-  chrome.storage.local.get(["murkyEnabled"], (result: { [key: string]: unknown }) => {
-    if (result.murkyEnabled === false) {
-      console.debug("[murky] disabled, skipping");
-      return;
-    }
-    // Load the active pack from the server before starting. We block the
-    // first scan on this so we don't briefly show local-only masks before
-    // the remote ones arrive.
-    loadActiveCollection()
-      .then((col) => run(adapter, col))
-      .catch((e) => {
-        console.warn("[murky] loadActiveCollection failed, using local fallback", e);
-        run(adapter, null);
-      });
+  const result = await new Promise<{ [key: string]: unknown }>((resolve) => {
+    chrome.storage.local.get(["murkyEnabled"], (r) => resolve(r));
   });
-}
+  if (result.murkyEnabled === false) {
+    console.debug("[murky] disabled, skipping");
+    return;
+  }
+
+  // Load the active pack from the server before starting. We block the
+  // first scan on this so we don't briefly show local-only masks before
+  // the remote ones arrive.
+  try {
+    const col = await loadActiveCollection();
+    await run(adapter, col);
+  } catch (e) {
+    console.warn("[murky] loadActiveCollection failed, using local fallback", e);
+    await run(adapter, null);
+  }
+})();
 
 function buildRegistry(collection: CollectionDetail | null): MaskRegistry {
   const registry = new MaskRegistry("random");
@@ -86,7 +100,7 @@ function buildRegistry(collection: CollectionDetail | null): MaskRegistry {
   return registry;
 }
 
-function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
+async function run(adapter: SiteAdapter, collection: CollectionDetail | null): Promise<void> {
   const registry = buildRegistry(collection);
 
   // --- State ---
@@ -95,16 +109,38 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
   const maskedCards: Set<HTMLElement> = new Set();
   const cardMasks = new WeakMap<HTMLElement, Mask>();
 
-  // --- Storage init ---
-  chrome.storage.local.get(
-    ["murkyRevealed"],
-    (result: { [key: string]: unknown }) => {
-      revealedCards = new Set(
-        (result.murkyRevealed as string[] | undefined) ?? []
-      );
-      processAllCards();
+  // --- Scoring (decides which products to mask) ---
+  // Load the scorer + profile + revealed-set BEFORE the first scan.
+  // Otherwise cards present at initial paint get processed with a null
+  // scorer, marked as processed, and never re-evaluated — only cards
+  // added later (via scroll → observer) would ever get masked.
+  const [scorerLoaded, profileLoaded, revealed] = await Promise.all([
+    getActiveScorer(),
+    getProfile(),
+    new Promise<string[]>((resolve) => {
+      chrome.storage.local.get(["murkyRevealed"], (r) => {
+        resolve((r.murkyRevealed as string[] | undefined) ?? []);
+      });
+    }),
+  ]);
+  let scorer: Scorer = scorerLoaded;
+  let profile: UserProfile = profileLoaded;
+  let scorerConfig = await getScorerConfig(scorer.id);
+  revealedCards = new Set(revealed);
+  console.debug("[murky] active scorer:", scorer.id, "profile:", profile);
+
+  onModelReady(() => {
+    console.debug("[murky] embedding model ready — newly observed cards will use it");
+  });
+
+  chrome.storage.onChanged.addListener(async (c) => {
+    if (c.murkyProfile) profile = (c.murkyProfile.newValue as UserProfile) ?? {};
+    if (c.murkyScorerId) {
+      scorer = await getActiveScorer();
+      scorerConfig = await getScorerConfig(scorer.id);
+      console.debug("[murky] scorer switched to:", scorer.id);
     }
-  );
+  });
 
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.murkyRevealed) {
@@ -152,7 +188,7 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
   }
 
   // --- Mounting masks via the registry ---
-  function attachMaskToCard(card: HTMLElement, cardId: string | null): void {
+  async function attachMaskToCard(card: HTMLElement, cardId: string | null): Promise<void> {
     if (processedCards.has(card)) return;
 
     const productId: ProductId | null = getProductId(card);
@@ -165,7 +201,30 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
     if (!features.title) return;
 
     processedCards.add(card);
-    const wasMasked = Math.random() > 0.5;
+
+    // Score the product — async so heavy scorers (embeddings) don't block.
+    let wasMasked = false;
+    try {
+      const decision = await scorer.score({
+        productId,
+        features,
+        profile,
+        config: scorerConfig,
+        pageUrl: window.location.href,
+      });
+      wasMasked = decision.shouldMask;
+      if (productId) {
+        console.debug(
+          "[murky] score",
+          productId.itemId,
+          decision.modelId,
+          decision.score.toFixed(2),
+          decision.reason
+        );
+      }
+    } catch (e) {
+      console.warn("[murky] scorer threw, defaulting to no-mask", e);
+    }
 
     if (productId) {
       recordImpression(productId, features, wasMasked);
@@ -233,6 +292,24 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
       productLink.addEventListener("click", () => {
         recordClick(productId.itemId);
         recordBehaviorClick(`${adapter.siteId}:${productId.itemId}`, wasMasked);
+        // Cross-origin click trace: ask the background worker to
+        // schedule a gentle "does this fit?" check on the destination
+        // page. The high-value signal is clicks on cards the user had
+        // to unmask (i.e., they bypassed our recommendation). For
+        // never-masked cards the regret signal is weaker; we still
+        // send it so the background can decide whether to prompt.
+        const userBypassedMask =
+          wasMasked && cardId !== null && revealedCards.has(cardId);
+        chrome.runtime.sendMessage({
+          type: "trace-click",
+          href: productLink.href,
+          siteId: adapter.siteId,
+          productKey: `${adapter.siteId}:${productId.itemId}`,
+          title: features.title ?? null,
+          wasMasked,
+          userBypassedMask,
+          clickedAt: Date.now(),
+        });
       });
     }
   }
@@ -257,7 +334,8 @@ function run(adapter: SiteAdapter, collection: CollectionDetail | null): void {
     const cards = findProductCards();
     for (const card of cards) {
       const cardId = getCardId(card);
-      attachMaskToCard(card, cardId);
+      // Fire-and-forget — scoring is async, cards are independent.
+      void attachMaskToCard(card, cardId);
     }
   }
 

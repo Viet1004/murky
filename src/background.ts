@@ -1,21 +1,57 @@
 /**
  * Background service worker.
  *
- * Proxies fetch requests from content scripts / popup so they aren't
- * subject to the page's CORS / Private Network Access restrictions.
+ * Responsibilities:
+ *   1. Proxy fetch requests from content scripts / popup so they aren't
+ *      subject to the page's CORS / Private Network Access restrictions.
+ *   2. Click-trace registry: when a content script reports the user
+ *      followed a tracked card, watch tab navigation and inject a gentle
+ *      regret prompt on the destination page after a dwell period.
+ *   3. Dynamic content-script registration: when the picker saves a
+ *      selector for a new origin, register the content script on that
+ *      origin so future visits auto-mask.
  *
- * Message types:
- *   { type: "fetch", url, headers? }           — GET request
- *   { type: "fetch-post", url, headers?, body } — POST request (string body)
+ * Message types handled:
+ *   { type: "fetch", url, headers? }
+ *   { type: "fetch-post", url, headers?, body }
+ *   { type: "trace-click", href, siteId, productKey, title, wasMasked,
+ *                          userBypassedMask, clickedAt }
+ *   { type: "regret-response", event }
+ *   { type: "register-origin", origin }
+ *   { type: "unregister-origin", origin }
+ *   { type: "run-picker" }  (from popup — injects the picker overlay)
  */
 
-const ALLOWED_EXTERNAL_ORIGIN = "http://localhost:8000";
-const DEFAULT_SERVER_URL = "http://localhost:8000";
+import type { RegretContext, RegretEvent } from "./regret/client";
+import {
+  pullAndMerge,
+  pushSiteSelector,
+  deleteSiteSelectorOnServer,
+  clearAllOnServer,
+  watchStorageForPreferenceChanges,
+  isSyncEnabled,
+} from "./sync";
+import type { SiteSelectorConfig } from "./picker/store";
+
+const ALLOWED_EXTERNAL_ORIGINS = new Set([
+  "http://localhost:5173",
+  "http://localhost:8000",
+]);
+const DEFAULT_SERVER_URL = "http://localhost:5173";
 const SERVER_URL_KEY = "murkyServerUrl";
 const AUTH_TOKEN_KEY = "murkyAuthToken";
 const AUTH_EMAIL_KEY = "murkyAuthEmail";
 const AUTH_REFRESH_TOKEN_KEY = "murkyAuthRefreshToken";
 const AUTH_EXPIRES_AT_KEY = "murkyAuthExpiresAt";
+const REGRET_RATE_KEY = "murkyRegretRate";
+const SITE_SELECTORS_KEY = "murkySiteSelectors";
+
+const TRACE_TTL_MS = 30_000;          // a trace expires if no nav within 30s
+const TRACE_MAX_PENDING = 100;
+const REGRET_MAX_PER_ORIGIN_WEEK = 3;
+const REGRET_MAX_PER_SESSION = 1;
+const REGRET_MIN_GAP_MS = 30 * 60 * 1000;  // 30 min between prompts
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface PublicConfig {
   supabaseUrl: string;
@@ -34,7 +70,44 @@ interface RefreshTokenResponse {
   expires_in?: number;
 }
 
+interface PendingTrace {
+  traceId: string;
+  href: string;
+  hrefOrigin: string;
+  hrefPathPrefix: string;
+  siteId: string;
+  productKey: string;
+  title: string | null;
+  wasMasked: boolean;
+  userBypassedMask: boolean;
+  clickedAt: number;
+  expiresAt: number;
+  /** True once we've injected the prompt — never inject twice. */
+  fired: boolean;
+}
+
+interface RegretRateRecord {
+  /** Per-origin timestamps of past prompts (last 7 days). */
+  perOrigin: Record<string, number[]>;
+  /** Global "last shown" timestamp for cross-origin gap. */
+  lastShownAt: number;
+  /** ms timestamp of background start — proxy for "session". */
+  sessionStart: number;
+  /** Count shown in current session. */
+  shownThisSession: number;
+}
+
 let publicConfigPromise: Promise<PublicConfig> | null = null;
+const pendingTraces: PendingTrace[] = [];
+const sessionStart = Date.now();
+let traceSequence = 0;
+
+function nextTraceId(): string {
+  traceSequence++;
+  return `t-${sessionStart}-${traceSequence}`;
+}
+
+// --- Storage helpers ----------------------------------------------------
 
 function storageGet<T extends object>(keys: string[]): Promise<T> {
   return new Promise((resolve) => {
@@ -50,19 +123,17 @@ function storageRemove(keys: string[]): Promise<void> {
   return new Promise((resolve) => chrome.storage.local.remove(keys, resolve));
 }
 
+// --- Server URL + auth (unchanged from previous version) ----------------
+
 async function getServerUrl(): Promise<string> {
-  const result = await storageGet<{ [SERVER_URL_KEY]?: string }>([
-    SERVER_URL_KEY,
-  ]);
+  const result = await storageGet<{ [SERVER_URL_KEY]?: string }>([SERVER_URL_KEY]);
   return (result[SERVER_URL_KEY] ?? DEFAULT_SERVER_URL).replace(/\/$/, "");
 }
 
 async function isMurkyServerRequest(url: string): Promise<boolean> {
   const serverUrl = await getServerUrl();
   try {
-    const requestUrl = new URL(url);
-    const configuredUrl = new URL(serverUrl);
-    return requestUrl.origin === configuredUrl.origin;
+    return new URL(url).origin === new URL(serverUrl).origin;
   } catch {
     return false;
   }
@@ -89,15 +160,10 @@ function readPublicConfig(data: Record<string, unknown>): PublicConfig {
               : typeof data.supabaseAnonKey === "string"
                 ? data.supabaseAnonKey
                 : "";
-
   if (!supabaseUrl || !publishableKey) {
     throw new Error("public config missing Supabase settings");
   }
-
-  return {
-    supabaseUrl: supabaseUrl.replace(/\/$/, ""),
-    publishableKey,
-  };
+  return { supabaseUrl: supabaseUrl.replace(/\/$/, ""), publishableKey };
 }
 
 async function getPublicConfig(): Promise<PublicConfig> {
@@ -105,9 +171,7 @@ async function getPublicConfig(): Promise<PublicConfig> {
     publicConfigPromise = getServerUrl()
       .then((serverUrl) => fetch(`${serverUrl}/api/public-config`))
       .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(`public config HTTP ${res.status}`);
-        }
+        if (!res.ok) throw new Error(`public config HTTP ${res.status}`);
         const data = (await res.json()) as Record<string, unknown>;
         return readPublicConfig(data);
       })
@@ -137,36 +201,23 @@ async function getValidAccessToken(): Promise<string | null> {
   const token = auth[AUTH_TOKEN_KEY];
   const refreshToken = auth[AUTH_REFRESH_TOKEN_KEY];
   const expiresAt = auth[AUTH_EXPIRES_AT_KEY];
-
   if (!token) return null;
-
-  if (typeof expiresAt === "number" && expiresAt - Date.now() > 60_000) {
-    return token;
-  }
-
+  if (typeof expiresAt === "number" && expiresAt - Date.now() > 60_000) return token;
   if (!refreshToken) return null;
-
   try {
     const { supabaseUrl, publishableKey } = await getPublicConfig();
     const res = await fetch(
       `${supabaseUrl}/auth/v1/token?grant_type=refresh_token`,
       {
         method: "POST",
-        headers: {
-          apikey: publishableKey,
-          "Content-Type": "application/json",
-        },
+        headers: { apikey: publishableKey, "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: refreshToken }),
       }
     );
-
     if (!res.ok) {
-      if (res.status === 400 || res.status === 401) {
-        await clearAuth();
-      }
+      if (res.status === 400 || res.status === 401) await clearAuth();
       return null;
     }
-
     const data = (await res.json()) as RefreshTokenResponse;
     if (
       typeof data.access_token !== "string" ||
@@ -175,7 +226,6 @@ async function getValidAccessToken(): Promise<string | null> {
     ) {
       return null;
     }
-
     const newExpiresAt = Date.now() + data.expires_in * 1000;
     await storageSet({
       [AUTH_TOKEN_KEY]: data.access_token,
@@ -193,77 +243,435 @@ async function authHeadersForRequest(
   url: string,
   headers?: Record<string, string>
 ): Promise<Record<string, string> | undefined> {
-  if (!(await isMurkyServerRequest(url))) {
-    return headers;
-  }
-
-  const nextHeaders = { ...(headers ?? {}) };
-  delete nextHeaders.Authorization;
-  delete nextHeaders.authorization;
-
+  if (!(await isMurkyServerRequest(url))) return headers;
+  const next = { ...(headers ?? {}) };
+  delete next.Authorization;
+  delete next.authorization;
   const token = await getValidAccessToken();
-  if (token) {
-    nextHeaders.Authorization = `Bearer ${token}`;
-  }
-
-  return Object.keys(nextHeaders).length > 0 ? nextHeaders : undefined;
+  if (token) next.Authorization = `Bearer ${token}`;
+  return Object.keys(next).length > 0 ? next : undefined;
 }
+
+// --- Click-trace registry -----------------------------------------------
+
+function pruneTraces(): void {
+  const now = Date.now();
+  for (let i = pendingTraces.length - 1; i >= 0; i--) {
+    if (pendingTraces[i].expiresAt <= now || pendingTraces[i].fired) {
+      pendingTraces.splice(i, 1);
+    }
+  }
+  while (pendingTraces.length > TRACE_MAX_PENDING) pendingTraces.shift();
+}
+
+function registerTrace(message: {
+  href: string;
+  siteId: string;
+  productKey: string;
+  title: string | null;
+  wasMasked: boolean;
+  userBypassedMask: boolean;
+  clickedAt: number;
+}): void {
+  pruneTraces();
+  let hrefOrigin = "";
+  let hrefPathPrefix = "";
+  try {
+    const u = new URL(message.href);
+    hrefOrigin = u.origin;
+    // For matching: most product URLs share a prefix even after redirects.
+    // Take the first path segment as a coarse "is this the same product"
+    // hint; final URL match is tighter, this is the early gate.
+    hrefPathPrefix = u.pathname.split("/").slice(0, 3).join("/");
+  } catch {
+    return;
+  }
+  pendingTraces.push({
+    traceId: nextTraceId(),
+    href: message.href,
+    hrefOrigin,
+    hrefPathPrefix,
+    siteId: message.siteId,
+    productKey: message.productKey,
+    title: message.title,
+    wasMasked: message.wasMasked,
+    userBypassedMask: message.userBypassedMask,
+    clickedAt: message.clickedAt,
+    expiresAt: Date.now() + TRACE_TTL_MS,
+    fired: false,
+  });
+}
+
+function findTraceForUrl(url: string): PendingTrace | null {
+  pruneTraces();
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    return null;
+  }
+  // Prefer most recent matching trace (LIFO).
+  for (let i = pendingTraces.length - 1; i >= 0; i--) {
+    const t = pendingTraces[i];
+    if (t.fired) continue;
+    if (t.hrefOrigin && t.hrefOrigin !== target.origin) continue;
+    if (
+      t.hrefPathPrefix &&
+      !target.pathname.startsWith(t.hrefPathPrefix.split("/").slice(0, 2).join("/"))
+    ) {
+      continue;
+    }
+    return t;
+  }
+  return null;
+}
+
+// --- Rate limiting ------------------------------------------------------
+
+async function loadRate(): Promise<RegretRateRecord> {
+  const r = await storageGet<{ [REGRET_RATE_KEY]?: RegretRateRecord }>([REGRET_RATE_KEY]);
+  const rec = r[REGRET_RATE_KEY];
+  if (!rec || rec.sessionStart !== sessionStart) {
+    return {
+      perOrigin: rec?.perOrigin ?? {},
+      lastShownAt: rec?.lastShownAt ?? 0,
+      sessionStart,
+      shownThisSession: 0,
+    };
+  }
+  return rec;
+}
+
+function pruneRate(rec: RegretRateRecord): void {
+  const cutoff = Date.now() - WEEK_MS;
+  for (const origin of Object.keys(rec.perOrigin)) {
+    rec.perOrigin[origin] = rec.perOrigin[origin].filter((ts) => ts > cutoff);
+    if (rec.perOrigin[origin].length === 0) delete rec.perOrigin[origin];
+  }
+}
+
+async function canShowPrompt(origin: string): Promise<boolean> {
+  const rec = await loadRate();
+  pruneRate(rec);
+  const now = Date.now();
+  if (rec.shownThisSession >= REGRET_MAX_PER_SESSION) return false;
+  if (now - rec.lastShownAt < REGRET_MIN_GAP_MS) return false;
+  const list = rec.perOrigin[origin] ?? [];
+  if (list.length >= REGRET_MAX_PER_ORIGIN_WEEK) return false;
+  return true;
+}
+
+async function recordPromptShown(origin: string): Promise<void> {
+  const rec = await loadRate();
+  pruneRate(rec);
+  const now = Date.now();
+  rec.lastShownAt = now;
+  rec.shownThisSession += 1;
+  rec.perOrigin[origin] = [...(rec.perOrigin[origin] ?? []), now];
+  await storageSet({ [REGRET_RATE_KEY]: rec });
+}
+
+// --- Prompt injection ---------------------------------------------------
+
+function buildPromptText(trace: PendingTrace): string {
+  // Gentle, ambiguous, no shame. Mention what we know (title) only if we have it.
+  if (trace.userBypassedMask) {
+    return trace.title
+      ? `You unmasked "${truncate(trace.title, 60)}" and opened it. Does it still feel like a fit for what you wanted?`
+      : `You unmasked this and opened it. Does it still feel like a fit for what you wanted?`;
+  }
+  return trace.title
+    ? `Quick check — does "${truncate(trace.title, 60)}" still feel like a fit for what you're shopping for?`
+    : `Quick check — does this still feel like a fit for what you're shopping for?`;
+}
+
+function truncate(s: string, n: number): string {
+  return s.length <= n ? s : s.slice(0, n - 1) + "…";
+}
+
+async function injectRegretPrompt(tabId: number, trace: PendingTrace): Promise<void> {
+  const promptText = buildPromptText(trace);
+  const context: RegretContext = {
+    href: trace.href,
+    siteId: trace.siteId,
+    productKey: trace.productKey,
+    title: trace.title,
+    wasMasked: trace.wasMasked,
+    userBypassedMask: trace.userBypassedMask,
+    clickedAt: trace.clickedAt,
+    traceId: trace.traceId,
+  };
+  // Stash the payload on window via an arg-passed function, then load
+  // the bundled regret script which reads it.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      func: (ctx: RegretContext, text: string) => {
+        (window as unknown as { __MURKY_REGRET_PAYLOAD__: unknown }).__MURKY_REGRET_PAYLOAD__ = {
+          context: ctx,
+          promptText: text,
+        };
+      },
+      args: [context, promptText],
+    });
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["dist/regret.js"],
+    });
+    trace.fired = true;
+    await recordPromptShown(trace.hrefOrigin);
+  } catch (err) {
+    console.warn("[murky background] failed to inject regret prompt", err);
+  }
+}
+
+// --- Tab navigation watcher --------------------------------------------
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete") return;
+  const url = tab.url;
+  if (!url || !/^https?:/.test(url)) return;
+  void handleNavigation(tabId, url);
+});
+
+async function handleNavigation(tabId: number, url: string): Promise<void> {
+  const trace = findTraceForUrl(url);
+  if (!trace) return;
+  let originOk = "";
+  try {
+    originOk = new URL(url).origin;
+  } catch {
+    return;
+  }
+  // The regret prompt's only purpose is to collect a labeled training
+  // signal. If the user hasn't opted into telemetry, do not inject it —
+  // even though the prompt UI itself is local, the response would POST
+  // to /behavior/regret. Honor the toggle at the gate, not at the POST.
+  if (!(await behaviorTelemetryEnabled())) return;
+  if (!(await canShowPrompt(originOk))) return;
+  // Inject — the regret script handles its own dwell timer.
+  await injectRegretPrompt(tabId, trace);
+}
+
+async function behaviorTelemetryEnabled(): Promise<boolean> {
+  const r = await storageGet<{ murkyBehaviorEnabled?: boolean }>([
+    "murkyBehaviorEnabled",
+  ]);
+  return r.murkyBehaviorEnabled === true;
+}
+
+// --- Dynamic content-script registration --------------------------------
+
+function scriptIdForOrigin(origin: string): string {
+  return `murky-cs:${origin}`;
+}
+
+async function unregisterOriginContentScript(origin: string): Promise<void> {
+  const id = scriptIdForOrigin(origin);
+  try {
+    await chrome.scripting.unregisterContentScripts({ ids: [id] });
+    console.debug("[murky background] unregistered content script for", origin);
+  } catch (err) {
+    // Ignore — the script may simply not have been registered yet.
+    console.debug("[murky background] unregister noop for", origin, err);
+  }
+  // Mirror the delete to the server if sync is enabled. No-op otherwise.
+  void deleteSiteSelectorOnServer(origin);
+}
+
+async function registerOriginContentScript(origin: string): Promise<void> {
+  const matches = originToMatchPattern(origin);
+  if (!matches) return;
+  const id = scriptIdForOrigin(origin);
+  try {
+    // Unregister first so re-saves don't fail with "already exists".
+    await chrome.scripting.unregisterContentScripts({ ids: [id] }).catch(() => undefined);
+    await chrome.scripting.registerContentScripts([
+      {
+        id,
+        matches: [matches],
+        js: ["dist/content.js"],
+        css: ["styles.css"],
+        runAt: "document_idle",
+      },
+    ]);
+    console.debug("[murky background] registered content script for", matches);
+  } catch (err) {
+    console.warn("[murky background] failed to register content script", origin, err);
+  }
+  // Push the selector to the server if sync is enabled. No-op otherwise.
+  void pushSiteSelectorIfPresent(origin);
+}
+
+async function pushSiteSelectorIfPresent(origin: string): Promise<void> {
+  if (!(await isSyncEnabled())) return;
+  const r = await storageGet<{ murkySiteSelectors?: Record<string, SiteSelectorConfig> }>([
+    "murkySiteSelectors",
+  ]);
+  const config = r.murkySiteSelectors?.[origin];
+  if (config) await pushSiteSelector(config);
+}
+
+function originToMatchPattern(origin: string): string | null {
+  try {
+    const u = new URL(origin);
+    if (!/^https?:$/.test(u.protocol)) return null;
+    return `${u.protocol}//${u.hostname}/*`;
+  } catch {
+    return null;
+  }
+}
+
+/** Re-hydrate registrations on extension start (service worker may restart). */
+async function hydrateRegistrations(): Promise<void> {
+  const r = await storageGet<{
+    [SITE_SELECTORS_KEY]?: Record<string, { origin: string }>;
+  }>([SITE_SELECTORS_KEY]);
+  const store = r[SITE_SELECTORS_KEY] ?? {};
+  for (const origin of Object.keys(store)) {
+    await registerOriginContentScript(origin);
+  }
+}
+
+void hydrateRegistrations();
+
+// Run a sync pull on service-worker startup so a fresh install or browser
+// restart picks up anything saved on another device. No-op when sync is
+// off or signed out.
+void pullAndMerge();
+
+// React to focus-prompt / scorer-id changes by pushing preferences to
+// the server (gated inside the helper).
+watchStorageForPreferenceChanges();
+
+// --- Picker invocation from popup --------------------------------------
+
+async function runPicker(): Promise<{ ok: true } | { ok: false; error: string }> {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab?.id) return { ok: false, error: "no active tab" };
+  if (!activeTab.url || !/^https?:/.test(activeTab.url)) {
+    return { ok: false, error: "picker only works on http(s) pages" };
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: activeTab.id },
+      files: ["dist/picker.js"],
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+// --- Server forwarding for regret events --------------------------------
+
+async function forwardRegretEvent(event: RegretEvent): Promise<void> {
+  const base = await getServerUrl();
+  const url = `${base}/behavior/regret`;
+  const headers = await authHeadersForRequest(url, { "Content-Type": "application/json" });
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(event),
+    });
+  } catch (err) {
+    // Telemetry — swallow. Don't block the user on a network failure.
+    console.debug("[murky background] regret forward failed", err);
+  }
+}
+
+// --- Message router -----------------------------------------------------
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === "fetch" || message.type === "fetch-post") {
     const isPost = message.type === "fetch-post";
     authHeadersForRequest(message.url, message.headers)
       .then((headers) => {
-        const fetchOptions: RequestInit = {
-          method: isPost ? "POST" : "GET",
-        };
-        if (headers) {
-          fetchOptions.headers = headers;
-        }
-        if (isPost && message.body) {
-          fetchOptions.body = message.body;
-        }
+        const fetchOptions: RequestInit = { method: isPost ? "POST" : "GET" };
+        if (headers) fetchOptions.headers = headers;
+        if (isPost && message.body) fetchOptions.body = message.body;
         return fetch(message.url, fetchOptions);
       })
       .then((res) => {
-        if (!res.ok) {
-          return res.text().then((text) => {
-            throw new Error(`HTTP ${res.status}: ${text}`);
-          });
-        }
+        if (!res.ok) return res.text().then((text) => { throw new Error(`HTTP ${res.status}: ${text}`); });
         return res.json();
       })
       .then((data) => sendResponse({ ok: true, data }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
-});
 
-chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
-  if (sender.origin !== ALLOWED_EXTERNAL_ORIGIN) {
-    console.warn("[murky background] rejected external message", {
-      origin: sender.origin,
-      type: message?.type,
-    });
-    sendResponse({ ok: false, error: "origin not allowed" });
+  if (message.type === "trace-click") {
+    registerTrace(message);
+    sendResponse({ ok: true });
     return false;
   }
 
+  if (message.type === "regret-response") {
+    void forwardRegretEvent(message.event as RegretEvent);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === "register-origin") {
+    void registerOriginContentScript(message.origin);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === "unregister-origin") {
+    void unregisterOriginContentScript(message.origin);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === "sync-toggle") {
+    // When the user newly enables sync, do an immediate merge so their
+    // existing local masks land on the server and any server-only
+    // entries pull down. When disabled, nothing to do — push/pull
+    // helpers self-gate on isSyncEnabled().
+    if (message.enabled) void pullAndMerge();
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message.type === "sync-clear") {
+    void clearAllOnServer()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (message.type === "run-picker") {
+    void runPicker().then(sendResponse);
+    return true;
+  }
+
+  return false;
+});
+
+// --- External (web app) messages — unchanged ---------------------------
+
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  if (!sender.origin || !ALLOWED_EXTERNAL_ORIGINS.has(sender.origin)) {
+    console.warn("[murky background] rejected external message", { origin: sender.origin, type: message?.type });
+    sendResponse({ ok: false, error: "origin not allowed" });
+    return false;
+  }
   if (message?.type === "auth-token") {
     const token = typeof message.token === "string" ? message.token : "";
     const email = typeof message.email === "string" ? message.email : "";
-    const refreshToken =
-      typeof message.refreshToken === "string" ? message.refreshToken : "";
+    const refreshToken = typeof message.refreshToken === "string" ? message.refreshToken : "";
     const expiresAt =
       typeof message.expiresAt === "number" && Number.isFinite(message.expiresAt)
         ? message.expiresAt
         : null;
-
     if (!token) {
       sendResponse({ ok: false, error: "missing token" });
       return false;
     }
-
     chrome.storage.local.set(
       {
         murkyAuthToken: token,
@@ -275,11 +683,16 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     );
     return true;
   }
-
-  console.warn("[murky background] unknown external message", {
-    origin: sender.origin,
-    type: message?.type,
-  });
+  if (message?.type === "set-active-collection") {
+    const slug = typeof message.slug === "string" ? message.slug.trim() : "";
+    if (!slug) {
+      sendResponse({ ok: false, error: "missing slug" });
+      return false;
+    }
+    chrome.storage.local.set({ murkyActivePack: slug }, () => sendResponse({ ok: true }));
+    return true;
+  }
+  console.warn("[murky background] unknown external message", { origin: sender.origin, type: message?.type });
   sendResponse({ ok: false, error: "unknown message type" });
   return false;
 });
