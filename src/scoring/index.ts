@@ -10,7 +10,13 @@
 import { register, get, list } from "./registry";
 import { randomScorer } from "./models/randomScorer";
 import { heuristicScorer } from "./models/heuristicScorer";
-import { embeddingScorer, onModelReady } from "./models/embeddingScorer";
+import {
+  embeddingScorer,
+  onModelReady,
+  getModelStatus,
+  preloadEmbeddingModel,
+} from "./models/embeddingScorer";
+import type { EmbeddingModelStatus, EmbeddingModelStatusRecord } from "./models/embeddingScorer";
 import { getProfile, getScorerId, getScorerConfig, DEFAULT_SCORER_ID } from "./storage";
 import { Scorer, ScoringContext, MaskDecision, UserProfile } from "./types";
 
@@ -38,5 +44,14 @@ export {
   getScorerId,
   getScorerConfig,
   onModelReady,
+  getModelStatus,
+  preloadEmbeddingModel,
 };
-export type { Scorer, ScoringContext, MaskDecision, UserProfile };
+export type {
+  Scorer,
+  ScoringContext,
+  MaskDecision,
+  UserProfile,
+  EmbeddingModelStatus,
+  EmbeddingModelStatusRecord,
+};

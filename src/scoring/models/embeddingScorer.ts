@@ -2,14 +2,20 @@ import { Scorer, ScoringContext, MaskDecision } from "../types";
 
 /**
  * Sentence-embedding scorer using @xenova/transformers (MiniLM-L6-v2,
- * ~25 MB quantized). Loaded lazily on first use; weights cache in
- * IndexedDB so subsequent page loads are fast.
+ * ~25 MB quantized). Loaded lazily on first use; weights cache in the
+ * Cache Storage API so subsequent page loads are instant.
  *
  * Decision: cosine(embed(prompt), embed(title)) — mask when below threshold.
  *
- * Behavior while warming up: returns shouldMask=false (fail open) so the
- * page isn't blocked. Caller can re-process cards once the model is ready
- * — see `onReady`.
+ * Behavior while warming up: returns shouldMask=false with reason
+ * "model-loading" (fail open) so the page isn't blocked. Callers MUST
+ * NOT mark such cards as permanently processed — when the model
+ * finishes loading, `onModelReady` fires and the content script
+ * should re-score those deferred cards.
+ *
+ * Status tracking: each transition is mirrored to chrome.storage.local
+ * under MODEL_STATUS_KEY so the popup can show "Downloading… 12 MB" /
+ * "Ready (23 MB)" / "Failed" badges.
  */
 
 type Pipeline = (
@@ -19,28 +25,104 @@ type Pipeline = (
 
 const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 const DEFAULT_THRESHOLD = 0.35;
+const MODEL_STATUS_KEY = "murkyEmbeddingModelStatus";
+
+export type EmbeddingModelStatus =
+  | "not-loaded"
+  | "loading"
+  | "ready"
+  | "error";
+
+export interface EmbeddingModelStatusRecord {
+  status: EmbeddingModelStatus;
+  /** Bytes downloaded so far (during loading) or total size (when ready). */
+  bytes: number;
+  /** Last update wall-clock time. */
+  updatedAt: number;
+  /** Error message when status === "error". */
+  error?: string;
+}
 
 let extractor: Pipeline | null = null;
 let loadingPromise: Promise<void> | null = null;
 let promptCache: { text: string; vec: Float32Array } | null = null;
 let onReadyCallbacks: Array<() => void> = [];
+let currentStatus: EmbeddingModelStatusRecord = {
+  status: "not-loaded",
+  bytes: 0,
+  updatedAt: Date.now(),
+};
+
+function setStatus(next: Partial<EmbeddingModelStatusRecord>): void {
+  currentStatus = { ...currentStatus, ...next, updatedAt: Date.now() };
+  // Mirror to chrome.storage.local so the popup can render a badge
+  // without having to reach into the content-script context.
+  try {
+    chrome.storage.local.set({ [MODEL_STATUS_KEY]: currentStatus });
+  } catch {
+    /* Not in an extension context (e.g. unit test) — silently ignore. */
+  }
+}
+
+export function getModelStatus(): EmbeddingModelStatusRecord {
+  return currentStatus;
+}
+
+/**
+ * Force-load the model. Useful for the popup's "Download now" button so
+ * the user can pre-warm before browsing instead of waiting on the first
+ * scored page. Returns when load completes (or rejects on error).
+ */
+export async function preloadEmbeddingModel(): Promise<void> {
+  await ensureLoaded();
+}
 
 async function ensureLoaded(): Promise<void> {
   if (extractor) return;
   if (loadingPromise) return loadingPromise;
+  setStatus({ status: "loading", bytes: 0, error: undefined });
   loadingPromise = (async () => {
-    // Dynamic import keeps the heavy lib out of the cold-start path.
-    const transformers = await import("@xenova/transformers");
-    transformers.env.allowLocalModels = false;
-    transformers.env.useBrowserCache = true;
-    extractor = (await transformers.pipeline(
-      "feature-extraction",
-      MODEL_ID
-    )) as unknown as Pipeline;
-    for (const cb of onReadyCallbacks) {
-      try { cb(); } catch { /* ignore */ }
+    try {
+      // Dynamic import keeps the heavy lib out of the cold-start path.
+      const transformers = await import("@xenova/transformers");
+      transformers.env.allowLocalModels = false;
+      transformers.env.useBrowserCache = true;
+      // Track bytes per file as they download. Xenova fires
+      // progress events with { status, file, loaded, total, progress }.
+      const fileTotals = new Map<string, number>();
+      extractor = (await transformers.pipeline(
+        "feature-extraction",
+        MODEL_ID,
+        {
+          progress_callback: (p: {
+            status?: string;
+            file?: string;
+            loaded?: number;
+            total?: number;
+          }) => {
+            if (!p.file) return;
+            if (typeof p.loaded === "number") {
+              fileTotals.set(p.file, p.loaded);
+              let sum = 0;
+              for (const v of fileTotals.values()) sum += v;
+              setStatus({ status: "loading", bytes: sum });
+            }
+          },
+        }
+      )) as unknown as Pipeline;
+      // Final size = sum of all completed files.
+      let totalBytes = 0;
+      for (const v of fileTotals.values()) totalBytes += v;
+      setStatus({ status: "ready", bytes: totalBytes });
+      for (const cb of onReadyCallbacks) {
+        try { cb(); } catch { /* ignore */ }
+      }
+      onReadyCallbacks = [];
+    } catch (err) {
+      setStatus({ status: "error", error: String(err) });
+      loadingPromise = null;
+      throw err;
     }
-    onReadyCallbacks = [];
   })();
   return loadingPromise;
 }

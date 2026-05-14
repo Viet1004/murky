@@ -566,6 +566,50 @@ async function runPicker(): Promise<{ ok: true } | { ok: false; error: string }>
   }
 }
 
+/**
+ * Pre-warm the embedding model from the popup's "Download now" button.
+ * The model lives in the content-script context (the page's network
+ * world), so we inject a tiny loader into the active tab. The loader
+ * imports dist/content.js's exported preloader via window-attached
+ * handle — which the content script publishes when it boots.
+ *
+ * Falls back gracefully if there's no http(s) tab: the user can just
+ * navigate to a real page; the next score call will trigger the load.
+ */
+async function preloadEmbeddingModelInActiveTab(): Promise<
+  { ok: true } | { ok: false; error: string }
+> {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab?.id) return { ok: false, error: "no active tab" };
+  if (!activeTab.url || !/^https?:/.test(activeTab.url)) {
+    return { ok: false, error: "open any http(s) page first, then click again" };
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: activeTab.id },
+      world: "ISOLATED",
+      func: () => {
+        const handle = (window as unknown as {
+          __MURKY_PRELOAD_EMBEDDING__?: () => Promise<void>;
+        }).__MURKY_PRELOAD_EMBEDDING__;
+        if (typeof handle === "function") {
+          void handle();
+        } else {
+          // Content script not yet loaded on this tab — Murky only
+          // injects on sites with a saved selector or a built-in
+          // adapter. Tell the user to open a supported page.
+          console.warn(
+            "[murky] preload requested but content script not present"
+          );
+        }
+      },
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
 // --- Server forwarding for regret events --------------------------------
 
 async function forwardRegretEvent(event: RegretEvent): Promise<void> {
@@ -651,6 +695,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     void clearAllOnServer()
       .then(() => sendResponse({ ok: true }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (message.type === "preload-embedding-model") {
+    void preloadEmbeddingModelInActiveTab().then(sendResponse);
     return true;
   }
 

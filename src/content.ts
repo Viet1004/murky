@@ -29,9 +29,17 @@ import {
   getProfile,
   getScorerConfig,
   onModelReady,
+  preloadEmbeddingModel,
   Scorer,
   UserProfile,
 } from "./scoring";
+
+// Expose a preload handle so the popup's "Download now" button (routed
+// through background → executeScript) can warm the embedding model
+// without waiting for an actual scoring call. No-op outside Chrome.
+(window as unknown as {
+  __MURKY_PRELOAD_EMBEDDING__?: () => Promise<void>;
+}).__MURKY_PRELOAD_EMBEDDING__ = preloadEmbeddingModel;
 
 // --- Pick the adapter for the current site (async — may consult per-origin store) ---
 void (async () => {
@@ -130,7 +138,12 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
   console.debug("[murky] active scorer:", scorer.id, "profile:", profile);
 
   onModelReady(() => {
-    console.debug("[murky] embedding model ready — newly observed cards will use it");
+    // Cards seen during model warm-up returned shouldMask=false with
+    // reason="model-loading" and were intentionally NOT added to
+    // processedCards. Re-run a full scan now so they get a real verdict
+    // instead of staying permanently unmasked.
+    console.debug("[murky] embedding model ready — re-scoring deferred cards");
+    processAllCards();
   });
 
   chrome.storage.onChanged.addListener(async (c) => {
@@ -200,10 +213,9 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     // processed so the next MutationObserver tick retries.
     if (!features.title) return;
 
-    processedCards.add(card);
-
     // Score the product — async so heavy scorers (embeddings) don't block.
     let wasMasked = false;
+    let deferredForModel = false;
     try {
       const decision = await scorer.score({
         productId,
@@ -213,6 +225,10 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
         pageUrl: window.location.href,
       });
       wasMasked = decision.shouldMask;
+      // Cards scored during model warm-up should be retried once the
+      // model is ready (see onModelReady above). Don't poison them by
+      // marking processed; let the re-scan find them again.
+      deferredForModel = decision.reason === "model-loading";
       if (productId) {
         console.debug(
           "[murky] score",
@@ -225,6 +241,8 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     } catch (e) {
       console.warn("[murky] scorer threw, defaulting to no-mask", e);
     }
+    if (deferredForModel) return;
+    processedCards.add(card);
 
     if (productId) {
       recordImpression(productId, features, wasMasked);

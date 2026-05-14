@@ -359,8 +359,107 @@ focusPromptInput.addEventListener("change", () => {
 });
 
 scorerSelect.addEventListener("change", () => {
-  chrome.storage.local.set({ murkyScorerId: scorerSelect.value }, reloadActiveTab);
+  chrome.storage.local.set({ murkyScorerId: scorerSelect.value }, () => {
+    refreshModelStatus();
+    reloadActiveTab();
+  });
 });
+
+// ---------- MiniLM model status indicator -------------------------------
+
+const modelStatusRow = document.getElementById("modelStatusRow") as HTMLDivElement;
+const modelStatusBadge = document.getElementById("modelStatusBadge") as HTMLDivElement;
+const downloadModelBtn = document.getElementById("downloadModelBtn") as HTMLButtonElement;
+
+interface EmbeddingModelStatusRecord {
+  status: "not-loaded" | "loading" | "ready" | "error";
+  bytes: number;
+  updatedAt: number;
+  error?: string;
+}
+
+function fmtMB(bytes: number): string {
+  if (!bytes) return "0 MB";
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+function renderModelStatus(rec: EmbeddingModelStatusRecord | undefined): void {
+  // Only show this row when the embedding scorer is selected — random
+  // and heuristic don't need a download.
+  if (scorerSelect.value !== "embedding-minilm") {
+    modelStatusRow.style.display = "none";
+    return;
+  }
+  modelStatusRow.style.display = "flex";
+  const r = rec ?? { status: "not-loaded", bytes: 0, updatedAt: 0 };
+  switch (r.status) {
+    case "not-loaded":
+      modelStatusBadge.textContent = "Model not downloaded yet — first page load will fetch it (~25 MB).";
+      downloadModelBtn.style.display = "block";
+      downloadModelBtn.disabled = false;
+      downloadModelBtn.textContent = "Download now";
+      break;
+    case "loading":
+      modelStatusBadge.textContent = `Downloading… ${fmtMB(r.bytes)}`;
+      downloadModelBtn.style.display = "block";
+      downloadModelBtn.disabled = true;
+      downloadModelBtn.textContent = "Downloading…";
+      break;
+    case "ready":
+      modelStatusBadge.textContent = `Model ready (${fmtMB(r.bytes)} downloaded).`;
+      downloadModelBtn.style.display = "none";
+      break;
+    case "error":
+      modelStatusBadge.textContent = `Download failed${r.error ? `: ${r.error.slice(0, 60)}` : ""}`;
+      downloadModelBtn.style.display = "block";
+      downloadModelBtn.disabled = false;
+      downloadModelBtn.textContent = "Retry";
+      break;
+  }
+}
+
+async function refreshModelStatus(): Promise<void> {
+  const r = await new Promise<{ murkyEmbeddingModelStatus?: EmbeddingModelStatusRecord }>(
+    (resolve) =>
+      chrome.storage.local.get(["murkyEmbeddingModelStatus"], (res) =>
+        resolve(res as { murkyEmbeddingModelStatus?: EmbeddingModelStatusRecord })
+      )
+  );
+  renderModelStatus(r.murkyEmbeddingModelStatus);
+}
+
+// Live updates: the embeddingScorer writes to this key during download.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (changes.murkyEmbeddingModelStatus) {
+    renderModelStatus(changes.murkyEmbeddingModelStatus.newValue as EmbeddingModelStatusRecord);
+  }
+});
+
+// "Download now" — embeddingScorer lives in the content-script context,
+// not the popup. To pre-warm the model from here we ask the background
+// SW to inject a small loader script into the active tab.
+downloadModelBtn.addEventListener("click", async () => {
+  downloadModelBtn.disabled = true;
+  downloadModelBtn.textContent = "Starting…";
+  try {
+    await new Promise<void>((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: "preload-embedding-model" }, (response) => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else if (!response?.ok) reject(new Error(response?.error ?? "preload failed"));
+        else resolve();
+      });
+    });
+    // Status badge will update via the storage listener as bytes flow in.
+  } catch (e) {
+    console.warn("[murky] preload failed", e);
+    downloadModelBtn.disabled = false;
+    downloadModelBtn.textContent = "Retry";
+    modelStatusBadge.textContent = `Could not start download: ${String(e).slice(0, 80)}`;
+  }
+});
+
+void refreshModelStatus();
 
 // ---------- Picker (universal element picker) ----------
 
