@@ -1,10 +1,37 @@
 /**
  * Cross-device sync subsystem (background-side only).
  *
+ * Mental model = Model A: when sync is on, the user's account on the
+ * server is the source of truth. The local chrome.storage cache is a
+ * writable view onto that account. Local edits push up immediately and
+ * the server's stored state propagates back via pull.
+ *
+ * On conflict (same origin in both places), server wins — *not* newer
+ * timestamp. This is the difference from a peer-to-peer LWW model and
+ * the reason the user can trust "delete on phone, gone on laptop."
+ *
+ * The first time sync is enabled, the popup shows an explicit dialog
+ * asking the user how to reconcile any pre-existing local data with
+ * whatever's on the server. That choice is one-shot and chooses between
+ * three sync modes:
+ *
+ *   - "merge"   — additively combine local + server (server wins on
+ *                 conflict). For users who say "add my device's data
+ *                 to my account."
+ *   - "replace" — wipe local, then pull from server. For users who say
+ *                 "I want this device to look like my account."
+ *   - "normal"  — ongoing sync, used after the first merge has happened.
+ *                 Server is canonical: pull → server-only items pull
+ *                 down, both-sides items take server's version,
+ *                 local-only items are assumed to be unsynced new
+ *                 entries and get pushed up. (Without tombstones, a
+ *                 deletion on another device that hasn't propagated yet
+ *                 may briefly resurrect locally; LWW handles convergence.)
+ *
  * Lives entirely in the background service worker. The picker, content
  * script, and popup never call this module directly — they write to
  * chrome.storage as before. The background watches storage changes and
- * fires push/pull/merge against the murky-server when:
+ * fires push/pull against the murky-server when:
  *   1. The user is signed in (murkyAuthToken is present), AND
  *   2. The sync toggle is on (murkySyncEnabled === true).
  *
@@ -100,7 +127,7 @@ export async function pushSiteSelector(config: SiteSelectorConfig): Promise<void
   const headers = await authHeader();
   if (!headers) return;
   try {
-    await fetch(`${await serverUrl()}/me/site-selectors`, {
+    const res = await fetch(`${await serverUrl()}/me/site-selectors`, {
       method: "PUT",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -113,8 +140,11 @@ export async function pushSiteSelector(config: SiteSelectorConfig): Promise<void
         label: config.label ?? null,
       }),
     });
+    console.info(
+      `[murky sync] PUT /me/site-selectors ${config.origin} — HTTP ${res.status}`
+    );
   } catch (e) {
-    console.debug("[murky sync] push site selector failed", e);
+    console.warn("[murky sync] push site selector failed", e);
   }
 }
 
@@ -125,9 +155,12 @@ export async function deleteSiteSelectorOnServer(origin: string): Promise<void> 
   try {
     const url = new URL(`${await serverUrl()}/me/site-selectors`);
     url.searchParams.set("origin", origin);
-    await fetch(url.toString(), { method: "DELETE", headers });
+    const res = await fetch(url.toString(), { method: "DELETE", headers });
+    console.info(
+      `[murky sync] DELETE /me/site-selectors ${origin} — HTTP ${res.status}`
+    );
   } catch (e) {
-    console.debug("[murky sync] delete site selector failed", e);
+    console.warn("[murky sync] delete site selector failed", e);
   }
 }
 
@@ -144,37 +177,78 @@ export async function pushPreferences(): Promise<void> {
   const focusPrompt = r[PROFILE_KEY]?.prompt ?? null;
   const scorerId = r[SCORER_ID_KEY] ?? null;
   try {
-    await fetch(`${await serverUrl()}/me/preferences`, {
+    const res = await fetch(`${await serverUrl()}/me/preferences`, {
       method: "PUT",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({ focus_prompt: focusPrompt, scorer_id: scorerId }),
     });
     await storageSet({ [PREFS_UPDATED_AT_KEY]: Date.now() });
+    console.info(
+      `[murky sync] PUT /me/preferences — HTTP ${res.status} ` +
+      `(focus_prompt=${focusPrompt ? "set" : "null"}, scorer_id=${scorerId ?? "null"})`
+    );
   } catch (e) {
-    console.debug("[murky sync] push preferences failed", e);
+    console.warn("[murky sync] push preferences failed", e);
   }
 }
 
-// ---- Pull + merge ---------------------------------------------------
+// ---- Run-sync (server-canonical, with three modes) -----------------
 
 /**
- * Pull from server and merge into local. Last-write-wins per origin
- * for selectors (compare server.updated_at vs local.savedAt). For
- * preferences, compare server.updated_at vs local PREFS_UPDATED_AT_KEY.
+ * Sync mode determines how the local cache reconciles with the server.
  *
- * Local-only entries are pushed up; server-only entries are pulled
- * down. After this completes, both sides agree.
+ * - "merge"   First-time enable, "Add this device's data to my account":
+ *             server-only items pull down, local-only items push up,
+ *             both-sides items take the SERVER's version (server is now
+ *             becoming the canonical store).
+ * - "replace" First-time enable, "Replace this device with my account":
+ *             wipe local, then pull from server. Local edits made before
+ *             enabling sync are discarded — the user explicitly chose
+ *             "give me the cloud version."
+ * - "normal"  Ongoing sync after the first-time merge has happened.
+ *             Server is canonical: pull drives the local cache. The
+ *             local-only case is treated as "newly created, push it"
+ *             since we can't (yet) distinguish "new" from "deleted on
+ *             another device."
  */
-export async function pullAndMerge(): Promise<void> {
-  if (!(await isSyncEnabled())) return;
+export type SyncMode = "merge" | "replace" | "normal";
+
+export async function runSync(mode: SyncMode = "normal"): Promise<void> {
+  if (!(await isSyncEnabled())) {
+    console.debug("[murky sync] runSync skipped — sync disabled or signed out");
+    return;
+  }
   const headers = await authHeader();
   if (!headers) return;
 
-  // --- Site selectors ---
+  if (mode === "replace") {
+    await replaceLocalWithServer(headers);
+    return;
+  }
+
+  await reconcileSelectors(headers, mode);
+  await reconcilePreferences(headers, mode);
+}
+
+/** Back-compat: the SW startup hook still calls pullAndMerge(). */
+export async function pullAndMerge(): Promise<void> {
+  return runSync("normal");
+}
+
+// --- Selectors -------------------------------------------------------
+
+async function reconcileSelectors(
+  headers: Record<string, string>,
+  mode: "merge" | "normal"
+): Promise<void> {
   let serverSelectors: ServerSiteSelector[] = [];
   try {
     const res = await fetch(`${await serverUrl()}/me/site-selectors`, { headers });
     if (res.ok) serverSelectors = (await res.json()) as ServerSiteSelector[];
+    else {
+      console.warn("[murky sync] pull site-selectors HTTP", res.status);
+      return;
+    }
   } catch (e) {
     console.debug("[murky sync] pull site-selectors failed", e);
     return;
@@ -189,33 +263,39 @@ export async function pullAndMerge(): Promise<void> {
   const serverByOrigin = new Map(serverSelectors.map((s) => [s.origin, s]));
   const localOrigins = new Set(Object.keys(localStore));
   const serverOrigins = new Set(serverByOrigin.keys());
+  let pulled = 0;
+  let pushed = 0;
 
-  // 1. Server-only -> pull into local.
+  // Server-side wins on conflict (Model A). The mode only changes how
+  // we handle local-only items.
   for (const origin of serverOrigins) {
-    if (!localOrigins.has(origin)) {
-      const s = serverByOrigin.get(origin)!;
-      localStore[origin] = serverToLocalSelector(s);
-    } else {
-      // 2. Both sides — compare timestamps, keep newer.
-      const localCfg = localStore[origin];
-      const serverMs = msFromIso(serverByOrigin.get(origin)!.updated_at);
-      const localMs = localCfg.savedAt;
-      if (serverMs > localMs) {
-        localStore[origin] = serverToLocalSelector(serverByOrigin.get(origin)!);
-      } else if (localMs > serverMs) {
-        await pushSiteSelector(localCfg);
-      }
-    }
+    const s = serverByOrigin.get(origin)!;
+    localStore[origin] = serverToLocalSelector(s);
+    if (!localOrigins.has(origin)) pulled++;
   }
-  // 3. Local-only -> push up.
   for (const origin of localOrigins) {
     if (!serverOrigins.has(origin)) {
+      // Local-only: push up. In both "merge" and "normal" we treat this
+      // as "the user created it locally and we owe it to the server."
+      // Without tombstones we can't distinguish this from "another
+      // device deleted it" — LWW handles eventual convergence.
       await pushSiteSelector(localStore[origin]);
+      pushed++;
     }
   }
   await storageSet({ [SITE_SELECTORS_KEY]: localStore });
+  console.info(
+    `[murky sync] selectors reconciled (mode=${mode}) — pulled ${pulled}, pushed ${pushed}, ` +
+    `local=${localOrigins.size}, server=${serverOrigins.size}`
+  );
+}
 
-  // --- Preferences ---
+// --- Preferences -----------------------------------------------------
+
+async function reconcilePreferences(
+  headers: Record<string, string>,
+  mode: "merge" | "normal"
+): Promise<void> {
   let serverPrefs: ServerPreferences | null = null;
   try {
     const res = await fetch(`${await serverUrl()}/me/preferences`, { headers });
@@ -231,23 +311,79 @@ export async function pullAndMerge(): Promise<void> {
     [SCORER_ID_KEY]?: string;
     [PREFS_UPDATED_AT_KEY]?: number;
   }>([PROFILE_KEY, SCORER_ID_KEY, PREFS_UPDATED_AT_KEY]);
-  const serverMs = msFromIso(serverPrefs.updated_at);
-  const localMs = localPrefs[PREFS_UPDATED_AT_KEY] ?? 0;
+  const serverHasPrefs =
+    serverPrefs.focus_prompt !== null || serverPrefs.scorer_id !== null;
+  const localHasValues = Boolean(
+    localPrefs[PROFILE_KEY]?.prompt || localPrefs[SCORER_ID_KEY]
+  );
 
-  if (serverMs > localMs) {
-    // Server wins: write into local. Don't bump local timestamp past
-    // server's so the next push doesn't bounce it back.
+  // Model A: server wins. The only time local "wins" is when the server
+  // has no preferences row yet AND local has values to seed it with.
+  if (serverHasPrefs) {
     const profile: UserProfile = { ...(localPrefs[PROFILE_KEY] ?? {}) };
     if (serverPrefs.focus_prompt !== null) profile.prompt = serverPrefs.focus_prompt;
     else delete profile.prompt;
     const next: Record<string, unknown> = {
       [PROFILE_KEY]: profile,
-      [PREFS_UPDATED_AT_KEY]: serverMs,
+      [PREFS_UPDATED_AT_KEY]: msFromIso(serverPrefs.updated_at) || Date.now(),
     };
     if (serverPrefs.scorer_id !== null) next[SCORER_ID_KEY] = serverPrefs.scorer_id;
     await storageSet(next);
-  } else if (localMs > serverMs) {
+    console.info(`[murky sync] preferences pulled from server (mode=${mode})`);
+  } else if (localHasValues) {
     await pushPreferences();
+    console.info(`[murky sync] preferences seeded to server (mode=${mode})`);
+  }
+}
+
+// --- Replace ---------------------------------------------------------
+
+async function replaceLocalWithServer(
+  headers: Record<string, string>
+): Promise<void> {
+  // 1. Clear local selectors and preferences.
+  await storageSet({
+    [SITE_SELECTORS_KEY]: {},
+    [PROFILE_KEY]: {},
+    [PREFS_UPDATED_AT_KEY]: 0,
+  });
+  // SCORER_ID_KEY: leave the popup's view untouched if server doesn't
+  // override it below.
+
+  // 2. Pull server selectors.
+  let serverSelectors: ServerSiteSelector[] = [];
+  try {
+    const res = await fetch(`${await serverUrl()}/me/site-selectors`, { headers });
+    if (res.ok) serverSelectors = (await res.json()) as ServerSiteSelector[];
+  } catch (e) {
+    console.debug("[murky sync] replace: pull selectors failed", e);
+  }
+  const localStore: Record<string, SiteSelectorConfig> = {};
+  for (const s of serverSelectors) {
+    localStore[s.origin] = serverToLocalSelector(s);
+  }
+  await storageSet({ [SITE_SELECTORS_KEY]: localStore });
+  console.info(
+    `[murky sync] replace: pulled ${serverSelectors.length} selectors from server`
+  );
+
+  // 3. Pull server preferences.
+  try {
+    const res = await fetch(`${await serverUrl()}/me/preferences`, { headers });
+    if (res.ok) {
+      const serverPrefs = (await res.json()) as ServerPreferences;
+      const profile: UserProfile = {};
+      if (serverPrefs.focus_prompt !== null) profile.prompt = serverPrefs.focus_prompt;
+      const next: Record<string, unknown> = {
+        [PROFILE_KEY]: profile,
+        [PREFS_UPDATED_AT_KEY]: msFromIso(serverPrefs.updated_at) || Date.now(),
+      };
+      if (serverPrefs.scorer_id !== null) next[SCORER_ID_KEY] = serverPrefs.scorer_id;
+      await storageSet(next);
+      console.info("[murky sync] replace: pulled preferences from server");
+    }
+  } catch (e) {
+    console.debug("[murky sync] replace: pull prefs failed", e);
   }
 }
 

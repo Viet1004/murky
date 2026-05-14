@@ -25,12 +25,14 @@
 import type { RegretContext, RegretEvent } from "./regret/client";
 import {
   pullAndMerge,
+  runSync,
   pushSiteSelector,
   deleteSiteSelectorOnServer,
   clearAllOnServer,
   watchStorageForPreferenceChanges,
   isSyncEnabled,
 } from "./sync";
+import type { SyncMode } from "./sync";
 import type { SiteSelectorConfig } from "./picker/store";
 
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
@@ -628,11 +630,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "sync-toggle") {
-    // When the user newly enables sync, do an immediate merge so their
-    // existing local masks land on the server and any server-only
-    // entries pull down. When disabled, nothing to do — push/pull
+    // The popup chooses the sync mode at first-time enable via the
+    // "merge / replace / cancel" dialog. After that, "normal" is sent
+    // on subsequent enables. On disable, nothing to do — push/pull
     // helpers self-gate on isSyncEnabled().
-    if (message.enabled) void pullAndMerge();
+    if (message.enabled) {
+      const mode: SyncMode =
+        message.action === "merge"
+          ? "merge"
+          : message.action === "replace"
+            ? "replace"
+            : "normal";
+      void runSync(mode);
+    }
     sendResponse({ ok: true });
     return false;
   }

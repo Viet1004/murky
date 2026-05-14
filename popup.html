@@ -340,7 +340,10 @@
     </div>
     <button class="disclosure-toggle" data-target="syncDisclosure">What gets sent?</button>
     <div class="disclosure-body" id="syncDisclosure">
-      When sync is on, Murky uploads to your account:
+      When sync is on, your <strong>account is the source of truth</strong>:
+      edits on this device push up to your account immediately, and
+      changes from other devices pull down on startup. Murky uploads to
+      your account:
       <pre>user_site_selectors:
   origin            "https://www.youtube.com"
   card_selector     ".ytm-shorts-lockup-view-model-v2"
@@ -356,6 +359,14 @@ user_preferences:
       <div style="margin-top:8px;">
         <button class="btn" id="clearSyncBtn" style="font-size:11px; padding:4px 10px; width:auto;">Delete sync data</button>
       </div>
+    </div>
+    <!-- First-time enable dialog: appears once when toggling sync on -->
+    <div id="syncFirstMergeDialog" style="display:none; margin-top:10px; padding:10px; background:var(--brand-50); border:1px solid #f5d6c1; border-radius:8px;">
+      <div style="font-size:12px; font-weight:600; color:var(--brand-700); margin-bottom:6px;">First-time sync — choose how to combine</div>
+      <div class="meta" id="syncFirstMergeSummary" style="margin-bottom:10px;">…</div>
+      <button class="btn btn-primary" id="syncMergeAddBtn" style="font-size:12px; padding:6px 10px;">Add this device's data to my account</button>
+      <button class="btn" id="syncMergeReplaceBtn" style="font-size:12px; padding:6px 10px; margin-top:4px;">Replace this device with my account's data</button>
+      <button class="btn" id="syncMergeCancelBtn" style="font-size:12px; padding:6px 10px; margin-top:4px;">Cancel — keep sync off</button>
     </div>
     <div class="gated-note" id="syncGatedNote" style="display:none;">Sign in to enable sync.</div>
   </div>

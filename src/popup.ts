@@ -179,16 +179,111 @@ studioBtn.addEventListener("click", async () => {
 });
 
 // ---------- Sync toggle (Tier 3 — opt-in cross-device sync) ----------
+//
+// Model A semantics: when the user enables sync, their account becomes
+// the source of truth. The first time sync is enabled, we show an
+// inline dialog asking how to reconcile any pre-existing local data
+// with whatever's already on their account. After that one-shot
+// choice, subsequent enables run a silent "normal" sync where the
+// server is canonical.
+
+const syncFirstMergeDialog = document.getElementById("syncFirstMergeDialog") as HTMLDivElement;
+const syncFirstMergeSummary = document.getElementById("syncFirstMergeSummary") as HTMLDivElement;
+const syncMergeAddBtn = document.getElementById("syncMergeAddBtn") as HTMLButtonElement;
+const syncMergeReplaceBtn = document.getElementById("syncMergeReplaceBtn") as HTMLButtonElement;
+const syncMergeCancelBtn = document.getElementById("syncMergeCancelBtn") as HTMLButtonElement;
+
+const FIRST_MERGE_DONE_KEY = "murkySyncFirstMergeDone";
+
+async function localDataSummary(): Promise<{ siteCount: number; hasPrefs: boolean }> {
+  const store = await loadStore();
+  const r = await new Promise<{ murkyProfile?: UserProfile; murkyScorerId?: string }>(
+    (resolve) => {
+      chrome.storage.local.get(["murkyProfile", "murkyScorerId"], (res) =>
+        resolve(res as { murkyProfile?: UserProfile; murkyScorerId?: string })
+      );
+    }
+  );
+  const hasPrefs = Boolean(r.murkyProfile?.prompt || r.murkyScorerId);
+  return { siteCount: Object.keys(store).length, hasPrefs };
+}
+
+async function enableSyncWithAction(action: "merge" | "replace" | "normal"): Promise<void> {
+  await new Promise<void>((resolve) =>
+    chrome.storage.local.set(
+      { murkySyncEnabled: true, [FIRST_MERGE_DONE_KEY]: true },
+      () => resolve()
+    )
+  );
+  chrome.runtime.sendMessage({ type: "sync-toggle", enabled: true, action });
+}
 
 syncToggle.addEventListener("change", async () => {
   const enabled = syncToggle.checked;
-  await new Promise<void>((resolve) =>
-    chrome.storage.local.set({ murkySyncEnabled: enabled }, () => resolve())
+  if (!enabled) {
+    // Turning sync off is unconditional and silent — no dialog, no
+    // network. Push/pull helpers self-gate on isSyncEnabled().
+    await new Promise<void>((resolve) =>
+      chrome.storage.local.set({ murkySyncEnabled: false }, () => resolve())
+    );
+    chrome.runtime.sendMessage({ type: "sync-toggle", enabled: false });
+    return;
+  }
+  // Enabling. Check whether we've already done the one-time merge
+  // dialog. If so, run a normal (silent) sync.
+  const stored = await new Promise<{ [FIRST_MERGE_DONE_KEY]?: boolean }>(
+    (resolve) => {
+      chrome.storage.local.get([FIRST_MERGE_DONE_KEY], (r) =>
+        resolve(r as { [FIRST_MERGE_DONE_KEY]?: boolean })
+      );
+    }
   );
-  // Tell background to push / pull immediately when newly enabled, or
-  // stop scheduled pushes when disabled. The handler is a no-op until the
-  // sync subsystem lands; this wiring is forward-compatible.
-  chrome.runtime.sendMessage({ type: "sync-toggle", enabled });
+  if (stored[FIRST_MERGE_DONE_KEY]) {
+    await enableSyncWithAction("normal");
+    return;
+  }
+  // First-time enable. If there's local data, surface the three-way
+  // dialog. Otherwise just enable silently in "merge" mode (which is
+  // additive — same as a no-op when local is empty).
+  const summary = await localDataSummary();
+  if (summary.siteCount === 0 && !summary.hasPrefs) {
+    await enableSyncWithAction("merge");
+    return;
+  }
+  const parts: string[] = [];
+  if (summary.siteCount > 0) {
+    parts.push(`${summary.siteCount} saved site${summary.siteCount === 1 ? "" : "s"}`);
+  }
+  if (summary.hasPrefs) parts.push("a focus prompt or scorer choice");
+  syncFirstMergeSummary.textContent =
+    `Found ${parts.join(" and ")} on this device. ` +
+    `Your account becomes the source of truth from here.`;
+  syncFirstMergeDialog.style.display = "block";
+  // Keep the toggle visually checked while the user decides; if they
+  // cancel we'll flip it back off.
+});
+
+syncMergeAddBtn.addEventListener("click", async () => {
+  syncFirstMergeDialog.style.display = "none";
+  await enableSyncWithAction("merge");
+});
+
+syncMergeReplaceBtn.addEventListener("click", async () => {
+  if (!window.confirm(
+    "Replace all local masks and your focus prompt with whatever's in your account? This can't be undone."
+  )) return;
+  syncFirstMergeDialog.style.display = "none";
+  await enableSyncWithAction("replace");
+  // Reload the active tab so masks reflect the freshly-pulled config.
+  reloadActiveTab();
+});
+
+syncMergeCancelBtn.addEventListener("click", async () => {
+  syncFirstMergeDialog.style.display = "none";
+  syncToggle.checked = false;
+  await new Promise<void>((resolve) =>
+    chrome.storage.local.set({ murkySyncEnabled: false }, () => resolve())
+  );
 });
 
 clearSyncBtn.addEventListener("click", async () => {
@@ -322,6 +417,11 @@ forgetSiteBtn.addEventListener("click", async () => {
   const origin = originOf(url);
   if (!origin) return;
   await deleteConfig(origin);
+  // Tell the background to unregister the dynamic content script AND
+  // mirror the delete to the server when sync is on. Without this
+  // message the server row would survive a Forget and "come back" on
+  // the next pullAndMerge.
+  chrome.runtime.sendMessage({ type: "unregister-origin", origin });
   if (tabs[0]?.id !== undefined) chrome.tabs.reload(tabs[0].id);
   await refreshPickerStatus();
   await refreshSavedSites();
