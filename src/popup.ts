@@ -4,6 +4,11 @@ import {
   getServerUrl,
   getActiveSlug,
   listMyLicenses,
+  listMyLibrary,
+  getServerPreferences,
+  setServerActiveCollection,
+  setLocalActiveSlug,
+  LibraryEntry,
   LicenseInfo,
 } from "./packs";
 
@@ -42,6 +47,8 @@ const savedSitesHeader = document.getElementById("savedSitesHeader") as HTMLButt
 const savedSitesSummary = document.getElementById("savedSitesSummary") as HTMLDivElement;
 const savedSitesChevron = document.getElementById("savedSitesChevron") as HTMLSpanElement;
 const savedSitesList = document.getElementById("savedSitesList") as HTMLDivElement;
+const activeCollectionSelect = document.getElementById("activeCollectionSelect") as HTMLSelectElement;
+const activeCollectionMeta = document.getElementById("activeCollectionMeta") as HTMLDivElement;
 
 const DEFAULT_SERVER_URL = "http://localhost:5173";
 const DEFAULT_SCORER_ID = "random";
@@ -140,7 +147,100 @@ async function refreshStatus(): Promise<void> {
   } catch {
     setStatus("local", "Server unreachable", "Falling back to bundled local masks.");
   }
+
+  // Populate the collection picker — best-effort, doesn't block status.
+  void refreshActiveCollectionPicker();
 }
+
+// ---------- Active collection picker ----------
+
+let lastLibrary: LibraryEntry[] = [];
+
+async function refreshActiveCollectionPicker(): Promise<void> {
+  const token = await getAuthToken();
+  if (!token) {
+    activeCollectionSelect.disabled = true;
+    activeCollectionSelect.innerHTML = `<option value="">— Sign in first —</option>`;
+    return;
+  }
+
+  // Pull library + server preference in parallel; fall back to local slug
+  // if the server is unreachable.
+  const [library, serverPrefs, localSlug] = await Promise.all([
+    listMyLibrary().catch(() => [] as LibraryEntry[]),
+    getServerPreferences(),
+    getActiveSlug(),
+  ]);
+  lastLibrary = library;
+
+  const currentSlug = serverPrefs?.active_collection_slug ?? localSlug ?? "";
+  // Drift fix: if the server's slug differs from local, mirror it down so
+  // the content script reads the same value on the next page load.
+  if (
+    serverPrefs &&
+    serverPrefs.active_collection_slug !== null &&
+    serverPrefs.active_collection_slug !== localSlug
+  ) {
+    await setLocalActiveSlug(serverPrefs.active_collection_slug);
+  }
+
+  // Only collections that are usable: owners always (so creators can preview
+  // their own drafts) + licensees only when published+approved (license_service
+  // already enforces this so it should always be true here, but be defensive).
+  const usable = library.filter(
+    (entry) =>
+      entry.role === "owner" ||
+      (entry.is_published && entry.review_state === "approved")
+  );
+
+  if (usable.length === 0) {
+    activeCollectionSelect.disabled = true;
+    activeCollectionSelect.innerHTML = `<option value="">— No collections yet —</option>`;
+    activeCollectionMeta.textContent =
+      "Click Browse to acquire a free collection or Studio to create your own.";
+    return;
+  }
+
+  activeCollectionSelect.disabled = false;
+  const options = [`<option value="">— None —</option>`].concat(
+    usable.map((entry) => {
+      const roleSuffix = entry.role === "owner" ? " (yours)" : "";
+      const escaped = escapeHtml(entry.display_name);
+      return `<option value="${escapeHtml(entry.slug)}">${escaped}${roleSuffix}</option>`;
+    })
+  );
+  activeCollectionSelect.innerHTML = options.join("");
+  activeCollectionSelect.value = currentSlug;
+
+  const chosen = usable.find((e) => e.slug === currentSlug);
+  activeCollectionMeta.textContent = chosen
+    ? `Active: ${chosen.display_name} · ${chosen.item_count} mask${chosen.item_count === 1 ? "" : "s"}`
+    : "Pick which mask collection the extension uses on every page.";
+}
+
+activeCollectionSelect.addEventListener("change", async () => {
+  const slug = activeCollectionSelect.value || null;
+  activeCollectionSelect.disabled = true;
+  try {
+    // Local first so the content script picks it up on reload even if the
+    // server call is slow or fails.
+    await setLocalActiveSlug(slug);
+    // Server is best-effort: if it fails the local change still applies.
+    try {
+      await setServerActiveCollection(slug);
+    } catch (e) {
+      console.warn("[murky] failed to persist active collection on server", e);
+    }
+    const chosen = lastLibrary.find((e) => e.slug === slug);
+    activeCollectionMeta.textContent = chosen
+      ? `Active: ${chosen.display_name} · ${chosen.item_count} mask${chosen.item_count === 1 ? "" : "s"}`
+      : "No collection selected — bundled local masks will be used.";
+    reloadActiveTab();
+    void refreshStatus();
+  } finally {
+    activeCollectionSelect.disabled = false;
+  }
+});
 
 // ---------- Events ----------
 

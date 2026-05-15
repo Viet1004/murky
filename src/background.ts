@@ -34,6 +34,13 @@ import {
 } from "./sync";
 import type { SyncMode } from "./sync";
 import type { SiteSelectorConfig } from "./picker/store";
+import {
+  AUTH_TOKEN_KEY,
+  AUTH_EMAIL_KEY,
+  AUTH_REFRESH_TOKEN_KEY,
+  AUTH_EXPIRES_AT_KEY,
+  getValidAccessToken,
+} from "./auth";
 
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   "http://localhost:5173",
@@ -41,10 +48,6 @@ const ALLOWED_EXTERNAL_ORIGINS = new Set([
 ]);
 const DEFAULT_SERVER_URL = "http://localhost:5173";
 const SERVER_URL_KEY = "murkyServerUrl";
-const AUTH_TOKEN_KEY = "murkyAuthToken";
-const AUTH_EMAIL_KEY = "murkyAuthEmail";
-const AUTH_REFRESH_TOKEN_KEY = "murkyAuthRefreshToken";
-const AUTH_EXPIRES_AT_KEY = "murkyAuthExpiresAt";
 const REGRET_RATE_KEY = "murkyRegretRate";
 const SITE_SELECTORS_KEY = "murkySiteSelectors";
 
@@ -54,23 +57,6 @@ const REGRET_MAX_PER_ORIGIN_WEEK = 3;
 const REGRET_MAX_PER_SESSION = 1;
 const REGRET_MIN_GAP_MS = 30 * 60 * 1000;  // 30 min between prompts
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-
-interface PublicConfig {
-  supabaseUrl: string;
-  publishableKey: string;
-}
-
-interface StoredAuth {
-  [AUTH_TOKEN_KEY]?: string;
-  [AUTH_REFRESH_TOKEN_KEY]?: string;
-  [AUTH_EXPIRES_AT_KEY]?: number;
-}
-
-interface RefreshTokenResponse {
-  access_token?: string;
-  refresh_token?: string;
-  expires_in?: number;
-}
 
 interface PendingTrace {
   traceId: string;
@@ -99,7 +85,6 @@ interface RegretRateRecord {
   shownThisSession: number;
 }
 
-let publicConfigPromise: Promise<PublicConfig> | null = null;
 const pendingTraces: PendingTrace[] = [];
 const sessionStart = Date.now();
 let traceSequence = 0;
@@ -121,10 +106,6 @@ function storageSet(items: Record<string, unknown>): Promise<void> {
   return new Promise((resolve) => chrome.storage.local.set(items, resolve));
 }
 
-function storageRemove(keys: string[]): Promise<void> {
-  return new Promise((resolve) => chrome.storage.local.remove(keys, resolve));
-}
-
 // --- Server URL + auth (unchanged from previous version) ----------------
 
 async function getServerUrl(): Promise<string> {
@@ -138,106 +119,6 @@ async function isMurkyServerRequest(url: string): Promise<boolean> {
     return new URL(url).origin === new URL(serverUrl).origin;
   } catch {
     return false;
-  }
-}
-
-function readPublicConfig(data: Record<string, unknown>): PublicConfig {
-  const supabaseUrl =
-    typeof data.supabaseUrl === "string"
-      ? data.supabaseUrl
-      : typeof data.supabase_url === "string"
-        ? data.supabase_url
-        : "";
-  const publishableKey =
-    typeof data.publishableKey === "string"
-      ? data.publishableKey
-      : typeof data.publishable_key === "string"
-        ? data.publishable_key
-        : typeof data.supabasePublishableKey === "string"
-          ? data.supabasePublishableKey
-          : typeof data.supabase_publishable_key === "string"
-            ? data.supabase_publishable_key
-            : typeof data.anonKey === "string"
-              ? data.anonKey
-              : typeof data.supabaseAnonKey === "string"
-                ? data.supabaseAnonKey
-                : "";
-  if (!supabaseUrl || !publishableKey) {
-    throw new Error("public config missing Supabase settings");
-  }
-  return { supabaseUrl: supabaseUrl.replace(/\/$/, ""), publishableKey };
-}
-
-async function getPublicConfig(): Promise<PublicConfig> {
-  if (!publicConfigPromise) {
-    publicConfigPromise = getServerUrl()
-      .then((serverUrl) => fetch(`${serverUrl}/api/public-config`))
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`public config HTTP ${res.status}`);
-        const data = (await res.json()) as Record<string, unknown>;
-        return readPublicConfig(data);
-      })
-      .catch((err) => {
-        publicConfigPromise = null;
-        throw err;
-      });
-  }
-  return publicConfigPromise;
-}
-
-async function clearAuth(): Promise<void> {
-  await storageRemove([
-    AUTH_TOKEN_KEY,
-    AUTH_EMAIL_KEY,
-    AUTH_REFRESH_TOKEN_KEY,
-    AUTH_EXPIRES_AT_KEY,
-  ]);
-}
-
-async function getValidAccessToken(): Promise<string | null> {
-  const auth = await storageGet<StoredAuth>([
-    AUTH_TOKEN_KEY,
-    AUTH_REFRESH_TOKEN_KEY,
-    AUTH_EXPIRES_AT_KEY,
-  ]);
-  const token = auth[AUTH_TOKEN_KEY];
-  const refreshToken = auth[AUTH_REFRESH_TOKEN_KEY];
-  const expiresAt = auth[AUTH_EXPIRES_AT_KEY];
-  if (!token) return null;
-  if (typeof expiresAt === "number" && expiresAt - Date.now() > 60_000) return token;
-  if (!refreshToken) return null;
-  try {
-    const { supabaseUrl, publishableKey } = await getPublicConfig();
-    const res = await fetch(
-      `${supabaseUrl}/auth/v1/token?grant_type=refresh_token`,
-      {
-        method: "POST",
-        headers: { apikey: publishableKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      }
-    );
-    if (!res.ok) {
-      if (res.status === 400 || res.status === 401) await clearAuth();
-      return null;
-    }
-    const data = (await res.json()) as RefreshTokenResponse;
-    if (
-      typeof data.access_token !== "string" ||
-      typeof data.refresh_token !== "string" ||
-      typeof data.expires_in !== "number"
-    ) {
-      return null;
-    }
-    const newExpiresAt = Date.now() + data.expires_in * 1000;
-    await storageSet({
-      [AUTH_TOKEN_KEY]: data.access_token,
-      [AUTH_REFRESH_TOKEN_KEY]: data.refresh_token,
-      [AUTH_EXPIRES_AT_KEY]: newExpiresAt,
-    });
-    return data.access_token;
-  } catch (err) {
-    console.warn("[murky background] failed to refresh auth token", err);
-    return null;
   }
 }
 
@@ -579,13 +460,17 @@ async function runPicker(): Promise<{ ok: true } | { ok: false; error: string }>
 async function preloadEmbeddingModelInActiveTab(): Promise<
   { ok: true } | { ok: false; error: string }
 > {
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!activeTab?.id) return { ok: false, error: "no active tab" };
-  if (!activeTab.url || !/^https?:/.test(activeTab.url)) {
-    return { ok: false, error: "open any http(s) page first, then click again" };
-  }
   try {
-    await chrome.scripting.executeScript({
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab?.id) return { ok: false, error: "no active tab" };
+    if (!activeTab.url || !/^https?:/.test(activeTab.url)) {
+      return { ok: false, error: "open any http(s) page first, then click again" };
+    }
+    // Inject a stub that calls the content script's exported preload
+    // handle. If the content script isn't present on this tab (no
+    // saved selector / no built-in adapter), the stub no-ops and we
+    // surface a friendly error.
+    const results = await chrome.scripting.executeScript({
       target: { tabId: activeTab.id },
       world: "ISOLATED",
       func: () => {
@@ -594,20 +479,35 @@ async function preloadEmbeddingModelInActiveTab(): Promise<
         }).__MURKY_PRELOAD_EMBEDDING__;
         if (typeof handle === "function") {
           void handle();
-        } else {
-          // Content script not yet loaded on this tab — Murky only
-          // injects on sites with a saved selector or a built-in
-          // adapter. Tell the user to open a supported page.
-          console.warn(
-            "[murky] preload requested but content script not present"
-          );
+          return { triggered: true };
         }
+        return { triggered: false };
       },
     });
+    const triggered = results?.[0]?.result?.triggered === true;
+    if (!triggered) {
+      return {
+        ok: false,
+        error:
+          "Murky isn't running on this page. Open a site you've picked (or shopee.vn) and try again.",
+      };
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err) };
   }
+}
+
+/** Mirror an error to the model-status key so the popup badge updates. */
+function reportPreloadError(error: string): void {
+  void chrome.storage.local.set({
+    murkyEmbeddingModelStatus: {
+      status: "error",
+      bytes: 0,
+      updatedAt: Date.now(),
+      error,
+    },
+  });
 }
 
 // --- Server forwarding for regret events --------------------------------
@@ -631,13 +531,23 @@ async function forwardRegretEvent(event: RegretEvent): Promise<void> {
 // --- Message router -----------------------------------------------------
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type === "fetch" || message.type === "fetch-post") {
-    const isPost = message.type === "fetch-post";
+  if (
+    message.type === "fetch" ||
+    message.type === "fetch-post" ||
+    message.type === "fetch-put"
+  ) {
+    const method =
+      message.type === "fetch-post"
+        ? "POST"
+        : message.type === "fetch-put"
+        ? "PUT"
+        : "GET";
+    const hasBody = method !== "GET";
     authHeadersForRequest(message.url, message.headers)
       .then((headers) => {
-        const fetchOptions: RequestInit = { method: isPost ? "POST" : "GET" };
+        const fetchOptions: RequestInit = { method };
         if (headers) fetchOptions.headers = headers;
-        if (isPost && message.body) fetchOptions.body = message.body;
+        if (hasBody && message.body) fetchOptions.body = message.body;
         return fetch(message.url, fetchOptions);
       })
       .then((res) => {
@@ -699,8 +609,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "preload-embedding-model") {
-    void preloadEmbeddingModelInActiveTab().then(sendResponse);
-    return true;
+    // Respond synchronously so the popup's message port doesn't time
+    // out while the SW spins up scripting/executeScript. Real progress
+    // (and any error) flows back via storage.onChanged on
+    // murkyEmbeddingModelStatus, which the popup is already listening on.
+    void preloadEmbeddingModelInActiveTab().then(
+      (r) => { if (!r.ok) reportPreloadError(r.error); },
+      (err) => reportPreloadError(String(err))
+    );
+    sendResponse({ ok: true });
+    return false;
   }
 
   if (message.type === "run-picker") {
@@ -733,10 +651,10 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     }
     chrome.storage.local.set(
       {
-        murkyAuthToken: token,
-        murkyAuthEmail: email || null,
-        murkyAuthRefreshToken: refreshToken || null,
-        murkyAuthExpiresAt: expiresAt,
+        [AUTH_TOKEN_KEY]: token,
+        [AUTH_EMAIL_KEY]: email || null,
+        [AUTH_REFRESH_TOKEN_KEY]: refreshToken || null,
+        [AUTH_EXPIRES_AT_KEY]: expiresAt,
       },
       () => sendResponse({ ok: true })
     );

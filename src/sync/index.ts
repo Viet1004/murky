@@ -47,13 +47,14 @@
  */
 
 import { SiteSelectorConfig } from "../picker/store";
+import { AUTH_TOKEN_KEY, getValidAccessToken } from "../auth";
 
 const SYNC_ENABLED_KEY = "murkySyncEnabled";
-const AUTH_TOKEN_KEY = "murkyAuthToken";
 const SERVER_URL_KEY = "murkyServerUrl";
 const SITE_SELECTORS_KEY = "murkySiteSelectors";
 const PROFILE_KEY = "murkyProfile";
 const SCORER_ID_KEY = "murkyScorerId";
+const ACTIVE_PACK_KEY = "murkyActivePack";
 const PREFS_UPDATED_AT_KEY = "murkyPreferencesUpdatedAt";
 const DEFAULT_SERVER_URL = "http://localhost:5173";
 
@@ -76,6 +77,7 @@ interface ServerSiteSelector {
 interface ServerPreferences {
   focus_prompt: string | null;
   scorer_id: string | null;
+  active_collection_slug: string | null;
   updated_at: string | null;
 }
 
@@ -96,9 +98,17 @@ async function serverUrl(): Promise<string> {
   return (r[SERVER_URL_KEY] ?? DEFAULT_SERVER_URL).replace(/\/$/, "");
 }
 
+/**
+ * Returns a fresh-or-refreshed Authorization header, or null if the user is
+ * signed out / refresh failed. Uses the shared auth.ts helper so this path
+ * gets the same token-refresh guarantee as the foreground bgFetch path.
+ *
+ * Previously this just read the stored JWT directly, which caused 401s on
+ * /me/site-selectors and /me/preferences whenever the token aged past 1 h
+ * without anyone touching the popup.
+ */
 async function authHeader(): Promise<Record<string, string> | null> {
-  const r = await storageGet<{ [AUTH_TOKEN_KEY]?: string }>([AUTH_TOKEN_KEY]);
-  const token = r[AUTH_TOKEN_KEY];
+  const token = await getValidAccessToken();
   return token ? { Authorization: `Bearer ${token}` } : null;
 }
 
@@ -173,19 +183,27 @@ export async function pushPreferences(): Promise<void> {
   const r = await storageGet<{
     [PROFILE_KEY]?: UserProfile;
     [SCORER_ID_KEY]?: string;
-  }>([PROFILE_KEY, SCORER_ID_KEY]);
+    [ACTIVE_PACK_KEY]?: string;
+  }>([PROFILE_KEY, SCORER_ID_KEY, ACTIVE_PACK_KEY]);
   const focusPrompt = r[PROFILE_KEY]?.prompt ?? null;
   const scorerId = r[SCORER_ID_KEY] ?? null;
+  const activeSlug = r[ACTIVE_PACK_KEY] ?? null;
   try {
     const res = await fetch(`${await serverUrl()}/me/preferences`, {
       method: "PUT",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ focus_prompt: focusPrompt, scorer_id: scorerId }),
+      body: JSON.stringify({
+        focus_prompt: focusPrompt,
+        scorer_id: scorerId,
+        active_collection_slug: activeSlug,
+      }),
     });
     await storageSet({ [PREFS_UPDATED_AT_KEY]: Date.now() });
     console.info(
       `[murky sync] PUT /me/preferences — HTTP ${res.status} ` +
-      `(focus_prompt=${focusPrompt ? "set" : "null"}, scorer_id=${scorerId ?? "null"})`
+      `(focus_prompt=${focusPrompt ? "set" : "null"}, ` +
+      `scorer_id=${scorerId ?? "null"}, ` +
+      `active_collection_slug=${activeSlug ?? "null"})`
     );
   } catch (e) {
     console.warn("[murky sync] push preferences failed", e);
@@ -309,12 +327,17 @@ async function reconcilePreferences(
   const localPrefs = await storageGet<{
     [PROFILE_KEY]?: UserProfile;
     [SCORER_ID_KEY]?: string;
+    [ACTIVE_PACK_KEY]?: string;
     [PREFS_UPDATED_AT_KEY]?: number;
-  }>([PROFILE_KEY, SCORER_ID_KEY, PREFS_UPDATED_AT_KEY]);
+  }>([PROFILE_KEY, SCORER_ID_KEY, ACTIVE_PACK_KEY, PREFS_UPDATED_AT_KEY]);
   const serverHasPrefs =
-    serverPrefs.focus_prompt !== null || serverPrefs.scorer_id !== null;
+    serverPrefs.focus_prompt !== null ||
+    serverPrefs.scorer_id !== null ||
+    serverPrefs.active_collection_slug !== null;
   const localHasValues = Boolean(
-    localPrefs[PROFILE_KEY]?.prompt || localPrefs[SCORER_ID_KEY]
+    localPrefs[PROFILE_KEY]?.prompt ||
+      localPrefs[SCORER_ID_KEY] ||
+      localPrefs[ACTIVE_PACK_KEY]
   );
 
   // Model A: server wins. The only time local "wins" is when the server
@@ -328,6 +351,9 @@ async function reconcilePreferences(
       [PREFS_UPDATED_AT_KEY]: msFromIso(serverPrefs.updated_at) || Date.now(),
     };
     if (serverPrefs.scorer_id !== null) next[SCORER_ID_KEY] = serverPrefs.scorer_id;
+    if (serverPrefs.active_collection_slug !== null) {
+      next[ACTIVE_PACK_KEY] = serverPrefs.active_collection_slug;
+    }
     await storageSet(next);
     console.info(`[murky sync] preferences pulled from server (mode=${mode})`);
   } else if (localHasValues) {
@@ -379,6 +405,9 @@ async function replaceLocalWithServer(
         [PREFS_UPDATED_AT_KEY]: msFromIso(serverPrefs.updated_at) || Date.now(),
       };
       if (serverPrefs.scorer_id !== null) next[SCORER_ID_KEY] = serverPrefs.scorer_id;
+      if (serverPrefs.active_collection_slug !== null) {
+        next[ACTIVE_PACK_KEY] = serverPrefs.active_collection_slug;
+      }
       await storageSet(next);
       console.info("[murky sync] replace: pulled preferences from server");
     }
@@ -440,7 +469,11 @@ export async function clearAllOnServer(): Promise<void> {
 export function watchStorageForPreferenceChanges(): void {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
-    if (changes[PROFILE_KEY] || changes[SCORER_ID_KEY]) {
+    if (
+      changes[PROFILE_KEY] ||
+      changes[SCORER_ID_KEY] ||
+      changes[ACTIVE_PACK_KEY]
+    ) {
       // Bump the local timestamp first so pull/push uses the right one.
       void storageSet({ [PREFS_UPDATED_AT_KEY]: Date.now() }).then(() =>
         pushPreferences()

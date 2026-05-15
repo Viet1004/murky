@@ -147,10 +147,27 @@ async function bgPost<T>(
   body: unknown,
   headers?: Record<string, string>
 ): Promise<T> {
+  return bgSendBody<T>("fetch-post", url, body, headers);
+}
+
+async function bgPut<T>(
+  url: string,
+  body: unknown,
+  headers?: Record<string, string>
+): Promise<T> {
+  return bgSendBody<T>("fetch-put", url, body, headers);
+}
+
+function bgSendBody<T>(
+  type: "fetch-post" | "fetch-put",
+  url: string,
+  body: unknown,
+  headers?: Record<string, string>
+): Promise<T> {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage(
       {
-        type: "fetch-post",
+        type,
         url,
         headers: {
           "Content-Type": "application/json",
@@ -162,7 +179,7 @@ async function bgPost<T>(
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
         } else if (!response?.ok) {
-          reject(new Error(response?.error ?? "bgPost failed"));
+          reject(new Error(response?.error ?? `${type} failed`));
         } else {
           resolve(response.data as T);
         }
@@ -204,6 +221,73 @@ export async function acquireCollection(collectionId: string): Promise<LicenseIn
   return bgPost<LicenseInfo>(`${base}/me/licenses/acquire`, {
     collection_id: collectionId,
   }, headers);
+}
+
+// ---------- Library + active-collection preference ----------
+
+export interface LibraryEntry {
+  id: string;
+  slug: string;
+  display_name: string;
+  description: string | null;
+  is_free: boolean;
+  price_cents: number;
+  currency: string;
+  is_published: boolean;
+  review_state: "draft" | "pending" | "approved" | "rejected";
+  role: "owner" | "licensee";
+  item_count: number;
+}
+
+export async function listMyLibrary(): Promise<LibraryEntry[]> {
+  const base = await getServerUrl();
+  const headers = await authHeaders();
+  return bgFetch<LibraryEntry[]>(`${base}/me/library`, headers);
+}
+
+export interface ServerPreferences {
+  focus_prompt: string | null;
+  scorer_id: string | null;
+  active_collection_slug: string | null;
+  updated_at: string | null;
+}
+
+export async function getServerPreferences(): Promise<ServerPreferences | null> {
+  const base = await getServerUrl();
+  const headers = await authHeaders();
+  try {
+    return await bgFetch<ServerPreferences>(`${base}/me/preferences`, headers);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist the active collection slug on the server. Best-effort: callers
+ * should also write chrome.storage.local so the content script picks it up
+ * synchronously.
+ */
+export async function setServerActiveCollection(
+  slug: string | null
+): Promise<void> {
+  const base = await getServerUrl();
+  const headers = await authHeaders();
+  await bgPut<unknown>(
+    `${base}/me/preferences`,
+    { active_collection_slug: slug },
+    headers
+  );
+}
+
+/** Write the active slug into chrome.storage.local so the content script picks it up. */
+export async function setLocalActiveSlug(slug: string | null): Promise<void> {
+  return new Promise((resolve) => {
+    if (slug) {
+      chrome.storage.local.set({ [ACTIVE_PACK_KEY]: slug }, () => resolve());
+    } else {
+      chrome.storage.local.remove(ACTIVE_PACK_KEY, () => resolve());
+    }
+  });
 }
 
 // Legacy: list packs (for backward compat during transition)

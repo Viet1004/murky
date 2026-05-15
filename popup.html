@@ -322,6 +322,15 @@
     </div>
     <div id="signedIn" style="display:none;">
       <div class="email" id="userEmail"></div>
+
+      <div class="field-label" style="margin-top:8px;">Active collection</div>
+      <select id="activeCollectionSelect" class="focus-model" style="margin-bottom:6px;">
+        <option value="">— None —</option>
+      </select>
+      <div class="meta" id="activeCollectionMeta" style="font-size:11px; color: var(--ink-muted); margin-bottom:8px;">
+        Pick which mask collection the extension uses on every page.
+      </div>
+
       <div class="row">
         <button class="btn btn-primary" id="browseSignedInBtn">Browse collections</button>
         <button class="btn" id="studioBtn">Studio</button>
