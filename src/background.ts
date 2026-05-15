@@ -579,13 +579,17 @@ async function runPicker(): Promise<{ ok: true } | { ok: false; error: string }>
 async function preloadEmbeddingModelInActiveTab(): Promise<
   { ok: true } | { ok: false; error: string }
 > {
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!activeTab?.id) return { ok: false, error: "no active tab" };
-  if (!activeTab.url || !/^https?:/.test(activeTab.url)) {
-    return { ok: false, error: "open any http(s) page first, then click again" };
-  }
   try {
-    await chrome.scripting.executeScript({
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab?.id) return { ok: false, error: "no active tab" };
+    if (!activeTab.url || !/^https?:/.test(activeTab.url)) {
+      return { ok: false, error: "open any http(s) page first, then click again" };
+    }
+    // Inject a stub that calls the content script's exported preload
+    // handle. If the content script isn't present on this tab (no
+    // saved selector / no built-in adapter), the stub no-ops and we
+    // surface a friendly error instead of silently succeeding.
+    const results = await chrome.scripting.executeScript({
       target: { tabId: activeTab.id },
       world: "ISOLATED",
       func: () => {
@@ -594,20 +598,35 @@ async function preloadEmbeddingModelInActiveTab(): Promise<
         }).__MURKY_PRELOAD_EMBEDDING__;
         if (typeof handle === "function") {
           void handle();
-        } else {
-          // Content script not yet loaded on this tab — Murky only
-          // injects on sites with a saved selector or a built-in
-          // adapter. Tell the user to open a supported page.
-          console.warn(
-            "[murky] preload requested but content script not present"
-          );
+          return { triggered: true };
         }
+        return { triggered: false };
       },
     });
+    const triggered = results?.[0]?.result?.triggered === true;
+    if (!triggered) {
+      return {
+        ok: false,
+        error:
+          "Murky isn't running on this page. Open a site you've picked (or shopee.vn) and try again.",
+      };
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err) };
   }
+}
+
+/** Mirror an error to the model-status key so the popup badge updates. */
+function reportPreloadError(error: string): void {
+  void chrome.storage.local.set({
+    murkyEmbeddingModelStatus: {
+      status: "error",
+      bytes: 0,
+      updatedAt: Date.now(),
+      error,
+    },
+  });
 }
 
 // --- Server forwarding for regret events --------------------------------
@@ -699,8 +718,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "preload-embedding-model") {
-    void preloadEmbeddingModelInActiveTab().then(sendResponse);
-    return true;
+    // Respond synchronously so the popup's message port doesn't time
+    // out while the SW spins up scripting/executeScript. Real progress
+    // (and any error) flows back via storage.onChanged on
+    // murkyEmbeddingModelStatus, which the popup is already listening on.
+    void preloadEmbeddingModelInActiveTab().then(
+      (r) => { if (!r.ok) reportPreloadError(r.error); },
+      (err) => reportPreloadError(String(err))
+    );
+    sendResponse({ ok: true });
+    return false;
   }
 
   if (message.type === "run-picker") {
