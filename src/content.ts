@@ -252,7 +252,14 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
       );
     }
 
-    if (!wasMasked) return;
+    if (!wasMasked) {
+      // Mask-first CSS hides every saved-site card by default; tag this
+      // one as cleared so the visibility:hidden rule no longer applies.
+      // No-op on sites without the mask-first stylesheet (the class is
+      // just unused there).
+      card.classList.add("murky-revealed");
+      return;
+    }
 
     const ctx: MaskContext = {
       productId,
@@ -297,6 +304,10 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     const mask = factory.create(ctx);
     mask.mount(card, ctx);
     maskedCards.add(card);
+    // Counterpart to the mask-first CSS: the card is now covered by
+    // mask art so we can safely make it visible (the user sees the mask,
+    // not the underlying content).
+    card.classList.add("murky-masked");
 
     const isAlreadyRevealed = cardId !== null && revealedCards.has(cardId);
     mask.setVisible(!isAlreadyRevealed);

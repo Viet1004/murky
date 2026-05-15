@@ -515,6 +515,83 @@ async function pushSiteSelectorIfPresent(origin: string): Promise<void> {
   if (config) await pushSiteSelector(config);
 }
 
+// --- Mask-first CSS injection -------------------------------------------
+//
+// On every top-level navigation, look up whether the destination origin
+// has a saved site selector. If so, inject a tiny stylesheet at the
+// earliest possible moment (webNavigation.onCommitted fires before the
+// document loads its content) that hides matching elements. The content
+// script later tags each card with .murky-revealed (safe) or
+// .murky-masked (mask art mounted on top), which un-hides it.
+//
+// A 3-second CSS-only safety animation re-shows any card that never got
+// a verdict — so a slow scorer or a stuck content script never leaves
+// the page permanently blank.
+
+const MASK_FIRST_SAFETY_MS = 3000;
+
+function buildMaskFirstCss(selector: string): string {
+  // Cards without a verdict class are hidden. The keyframe at delay
+  // MASK_FIRST_SAFETY_MS auto-reveals anything that's still unsorted.
+  return `
+    ${selector}:not(.murky-revealed):not(.murky-masked) {
+      visibility: hidden;
+      animation: murky-safety-reveal 0s linear ${MASK_FIRST_SAFETY_MS}ms forwards;
+    }
+    @keyframes murky-safety-reveal {
+      to { visibility: visible; }
+    }
+  `;
+}
+
+async function injectMaskFirstCss(tabId: number, origin: string): Promise<void> {
+  // Bail if the user has paused the extension globally — otherwise we'd
+  // hide cards on a paused install that has no content script to reveal them.
+  const enabled = await storageGet<{ murkyEnabled?: boolean }>(["murkyEnabled"]);
+  if (enabled.murkyEnabled === false) return;
+
+  const r = await storageGet<{ [SITE_SELECTORS_KEY]?: Record<string, SiteSelectorConfig> }>([
+    SITE_SELECTORS_KEY,
+  ]);
+  const config = r[SITE_SELECTORS_KEY]?.[origin];
+  if (!config?.cardSelector) return;
+
+  // Skip mask-first when the user has selected the embedding scorer but
+  // the model isn't ready yet. Otherwise the user stares at blank cards
+  // for the duration of the model download (5-10s) on first run. Once
+  // the model is ready, subsequent navigations get mask-first.
+  const scorerR = await storageGet<{ murkyScorerId?: string }>(["murkyScorerId"]);
+  if (scorerR.murkyScorerId === "embedding-minilm") {
+    const statusR = await storageGet<{
+      murkyEmbeddingModelStatus?: { status?: string };
+    }>(["murkyEmbeddingModelStatus"]);
+    if (statusR.murkyEmbeddingModelStatus?.status !== "ready") return;
+  }
+
+  try {
+    await chrome.scripting.insertCSS({
+      target: { tabId },
+      css: buildMaskFirstCss(config.cardSelector),
+    });
+  } catch (err) {
+    // CSP-locked sites or detached tabs can throw. Silent — page just
+    // falls back to "no mask-first," same as before this feature shipped.
+    console.debug("[murky background] mask-first insertCSS failed", origin, err);
+  }
+}
+
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (details.frameId !== 0) return; // top frame only
+  if (!details.url || !/^https?:/.test(details.url)) return;
+  let origin = "";
+  try {
+    origin = new URL(details.url).origin;
+  } catch {
+    return;
+  }
+  void injectMaskFirstCss(details.tabId, origin);
+});
+
 function originToMatchPattern(origin: string): string | null {
   try {
     const u = new URL(origin);
