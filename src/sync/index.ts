@@ -55,7 +55,7 @@ const SITE_SELECTORS_KEY = "murkySiteSelectors";
 const PROFILE_KEY = "murkyProfile";
 const SCORER_ID_KEY = "murkyScorerId";
 const PREFS_UPDATED_AT_KEY = "murkyPreferencesUpdatedAt";
-const DEFAULT_SERVER_URL = "http://localhost:5173";
+const DEFAULT_SERVER_URL = "https://gum2fjwx5t.ap-southeast-1.awsapprunner.com";
 
 interface UserProfile {
   prompt?: string;
