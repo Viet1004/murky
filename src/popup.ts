@@ -50,7 +50,7 @@ const savedSitesList = document.getElementById("savedSitesList") as HTMLDivEleme
 const activeCollectionSelect = document.getElementById("activeCollectionSelect") as HTMLSelectElement;
 const activeCollectionMeta = document.getElementById("activeCollectionMeta") as HTMLDivElement;
 
-const DEFAULT_SERVER_URL = "http://localhost:5173";
+const DEFAULT_SERVER_URL = "https://gum2fjwx5t.ap-southeast-1.awsapprunner.com";
 const DEFAULT_SCORER_ID = "random";
 
 interface UserProfile {

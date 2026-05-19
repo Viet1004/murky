@@ -1,4 +1,5 @@
 import { Scorer, ScoringContext, MaskDecision } from "../types";
+import { timings } from "../timings";
 
 /**
  * Sentence-embedding scorer using @xenova/transformers (MiniLM-L6-v2,
@@ -129,8 +130,10 @@ async function ensureLoaded(): Promise<void> {
 
 async function embed(text: string): Promise<Float32Array> {
   if (!extractor) throw new Error("model not loaded");
-  const out = await extractor(text, { pooling: "mean", normalize: true });
-  return out.data;
+  return timings.measure("embed", async () => {
+    const out = await extractor!(text, { pooling: "mean", normalize: true });
+    return out.data;
+  });
 }
 
 function cosine(a: Float32Array, b: Float32Array): number {
@@ -176,7 +179,7 @@ export const embeddingScorer: Scorer = {
       promptCache = { text: prompt, vec: await embed(prompt) };
     }
     const titleVec = await embed(title);
-    const sim = cosine(promptCache.vec, titleVec);
+    const sim = timings.measureSync("cosine", () => cosine(promptCache!.vec, titleVec));
     const threshold = (ctx.config.threshold as number | undefined) ?? DEFAULT_THRESHOLD;
 
     return {

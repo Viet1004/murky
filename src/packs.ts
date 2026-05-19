@@ -58,7 +58,7 @@ export interface PackSummary {
 
 // ---------- Storage keys ----------
 
-const DEFAULT_SERVER_URL = "http://localhost:5173";
+const DEFAULT_SERVER_URL = "https://gum2fjwx5t.ap-southeast-1.awsapprunner.com";
 const CACHE_KEY = "murkyCollectionCache";
 const SERVER_URL_KEY = "murkyServerUrl";
 const ACTIVE_PACK_KEY = "murkyActivePack"; // kept same key for compat

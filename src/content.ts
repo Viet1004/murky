@@ -33,6 +33,8 @@ import {
   Scorer,
   UserProfile,
 } from "./scoring";
+import { decisionCache, makeCacheKey, shortHash } from "./scoring/cache";
+import { timings } from "./scoring/timings";
 
 // Expose a preload handle so the popup's "Download now" button (routed
 // through background → executeScript) can warm the embedding model
@@ -122,6 +124,13 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
   // Otherwise cards present at initial paint get processed with a null
   // scorer, marked as processed, and never re-evaluated — only cards
   // added later (via scroll → observer) would ever get masked.
+  // Load scorer/profile/revealed-set AND the persistent decision cache
+  // BEFORE the first scan. Without awaiting decisionCache.ensureLoaded()
+  // here, the first processAllCards() runs before `persisted` is
+  // populated, so cache.get() always misses and cache.set() early-returns
+  // (silently dropping first-page writes). Result: the persistent cache
+  // would never warm on a fresh tab. Bundling it into the Promise.all
+  // adds at most one storage round-trip to startup.
   const [scorerLoaded, profileLoaded, revealed] = await Promise.all([
     getActiveScorer(),
     getProfile(),
@@ -130,11 +139,18 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
         resolve((r.murkyRevealed as string[] | undefined) ?? []);
       });
     }),
+    decisionCache.ensureLoaded(),
   ]);
   let scorer: Scorer = scorerLoaded;
   let profile: UserProfile = profileLoaded;
   let scorerConfig = await getScorerConfig(scorer.id);
   revealedCards = new Set(revealed);
+
+  // promptHash is recomputed whenever the prompt or scorer changes
+  // (which naturally invalidates all cache entries because the key
+  // includes both).
+  let promptHash = shortHash((profile.prompt ?? "").trim());
+
   console.debug("[murky] active scorer:", scorer.id, "profile:", profile);
 
   onModelReady(() => {
@@ -143,11 +159,14 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     // processedCards. Re-run a full scan now so they get a real verdict
     // instead of staying permanently unmasked.
     console.debug("[murky] embedding model ready — re-scoring deferred cards");
-    processAllCards();
+    void processAllCards();
   });
 
   chrome.storage.onChanged.addListener(async (c) => {
-    if (c.murkyProfile) profile = (c.murkyProfile.newValue as UserProfile) ?? {};
+    if (c.murkyProfile) {
+      profile = (c.murkyProfile.newValue as UserProfile) ?? {};
+      promptHash = shortHash((profile.prompt ?? "").trim());
+    }
     if (c.murkyScorerId) {
       scorer = await getActiveScorer();
       scorerConfig = await getScorerConfig(scorer.id);
@@ -205,7 +224,9 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     if (processedCards.has(card)) return;
 
     const productId: ProductId | null = getProductId(card);
-    const features = adapter.scrapeFeatures(card);
+    const features = timings.measureSync("scrape", () =>
+      adapter.scrapeFeatures(card)
+    );
 
     // Shopee hydrates card text after the element enters the DOM. If we
     // run before hydration, features.title is null and we'd end up with
@@ -213,33 +234,59 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     // processed so the next MutationObserver tick retries.
     if (!features.title) return;
 
-    // Score the product — async so heavy scorers (embeddings) don't block.
+    // Score the product — but check the decision cache first. A cache
+    // hit short-circuits the (potentially 50+ ms) embedding call. The
+    // cache key embeds productKey + scorer + promptHash, so a change to
+    // any of those three naturally invalidates the entry by missing.
     let wasMasked = false;
     let deferredForModel = false;
-    try {
-      const decision = await scorer.score({
-        productId,
-        features,
-        profile,
-        config: scorerConfig,
-        pageUrl: window.location.href,
-      });
-      wasMasked = decision.shouldMask;
-      // Cards scored during model warm-up should be retried once the
-      // model is ready (see onModelReady above). Don't poison them by
-      // marking processed; let the re-scan find them again.
-      deferredForModel = decision.reason === "model-loading";
-      if (productId) {
-        console.debug(
-          "[murky] score",
-          productId.itemId,
-          decision.modelId,
-          decision.score.toFixed(2),
-          decision.reason
+    const productKey = productId
+      ? `${adapter.siteId}:${productId.itemId}`
+      : null;
+    const cacheKey = productKey
+      ? makeCacheKey(productKey, scorer.id, promptHash)
+      : null;
+
+    const cached = cacheKey ? decisionCache.get(cacheKey) : undefined;
+    if (cached) {
+      wasMasked = cached.shouldMask;
+    } else {
+      try {
+        const decision = await timings.measure("score", () =>
+          Promise.resolve(
+            scorer.score({
+              productId,
+              features,
+              profile,
+              config: scorerConfig,
+              pageUrl: window.location.href,
+            })
+          )
         );
+        wasMasked = decision.shouldMask;
+        // Cards scored during model warm-up should be retried once the
+        // model is ready (see onModelReady above). Don't poison them by
+        // marking processed; let the re-scan find them again.
+        deferredForModel = decision.reason === "model-loading";
+        // Only cache real decisions, not the warm-up no-op.
+        if (cacheKey && !deferredForModel) {
+          decisionCache.set(cacheKey, {
+            shouldMask: wasMasked,
+            scoredAt: Date.now(),
+          });
+        }
+        if (productId) {
+          console.debug(
+            "[murky] score",
+            productId.itemId,
+            decision.modelId,
+            decision.score.toFixed(2),
+            decision.reason
+          );
+        }
+      } catch (e) {
+        console.warn("[murky] scorer threw, defaulting to no-mask", e);
       }
-    } catch (e) {
-      console.warn("[murky] scorer threw, defaulting to no-mask", e);
     }
     if (deferredForModel) return;
     processedCards.add(card);
@@ -252,7 +299,14 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
       );
     }
 
-    if (!wasMasked) return;
+    if (!wasMasked) {
+      // Mask-first CSS hides every saved-site card by default; tag this
+      // one as cleared so the visibility:hidden rule no longer applies.
+      // No-op on sites without the mask-first stylesheet (the class is
+      // just unused there).
+      card.classList.add("murky-revealed");
+      return;
+    }
 
     const ctx: MaskContext = {
       productId,
@@ -293,13 +347,19 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
       },
     };
 
-    const factory = registry.pick(ctx);
-    const mask = factory.create(ctx);
-    mask.mount(card, ctx);
-    maskedCards.add(card);
-
-    const isAlreadyRevealed = cardId !== null && revealedCards.has(cardId);
-    mask.setVisible(!isAlreadyRevealed);
+    const mask = timings.measureSync("mount", () => {
+      const factory = registry.pick(ctx);
+      const m = factory.create(ctx);
+      m.mount(card, ctx);
+      maskedCards.add(card);
+      // Counterpart to the mask-first CSS: the card is now covered by
+      // mask art so we can safely make it visible (the user sees the
+      // mask, not the underlying content).
+      card.classList.add("murky-masked");
+      const isAlreadyRevealed = cardId !== null && revealedCards.has(cardId);
+      m.setVisible(!isAlreadyRevealed);
+      return m;
+    });
 
     cardMasks.set(card, mask);
 
@@ -348,17 +408,27 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     }
   }
 
-  function processAllCards(): void {
+  async function processAllCards(): Promise<void> {
     const cards = findProductCards();
-    for (const card of cards) {
-      const cardId = getCardId(card);
-      // Fire-and-forget — scoring is async, cards are independent.
-      void attachMaskToCard(card, cardId);
+    if (cards.length === 0) return;
+    const t0 = performance.now();
+    // Cards are scored concurrently in JS, but the embedding scorer's
+    // wasm inference is single-threaded → they effectively serialize.
+    // Awaiting all settled lets us flush a coherent timing summary.
+    await Promise.allSettled(
+      cards.map((card) => attachMaskToCard(card, getCardId(card)))
+    );
+    if (timings.isEnabled()) {
+      const wall = performance.now() - t0;
+      console.log(
+        `[murky timing] page scan: ${cards.length} cards, wall=${wall.toFixed(0)}ms`
+      );
+      timings.flush(`per-card breakdown (${cards.length} cards)`);
     }
   }
 
   // --- Initial scan ---
-  processAllCards();
+  void processAllCards();
 
   // --- MutationObserver for lazy-rendered cards ---
   let isProcessing = false;
@@ -385,9 +455,12 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     if (shouldProcess) {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
+        // processAllCards is now async; keep the re-entrancy guard
+        // truthful by clearing it only after the scan resolves.
         isProcessing = true;
-        processAllCards();
-        isProcessing = false;
+        void processAllCards().finally(() => {
+          isProcessing = false;
+        });
       }, 300);
     }
   });
