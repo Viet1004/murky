@@ -4,13 +4,14 @@
   "description": "",
   "main": "dist/content.js",
   "scripts": {
-    "build": "npm run build:content && npm run build:popup && npm run build:bg && npm run build:picker && npm run build:regret",
+    "build": "npm run build:content && npm run build:popup && npm run build:bg && npm run build:picker && npm run build:regret && npm run build:redlist",
     "build:content": "esbuild src/content.ts --bundle --outfile=dist/content.js --format=iife --target=es2020",
     "build:popup": "esbuild src/popup.ts --bundle --outfile=dist/popup.js --format=iife --target=es2020",
     "build:bg": "esbuild src/background.ts --bundle --outfile=dist/background.js --format=iife --target=es2020",
     "build:picker": "esbuild src/picker/inject.ts --bundle --outfile=dist/picker.js --format=iife --target=es2020",
     "build:regret": "esbuild src/regret/inject.ts --bundle --outfile=dist/regret.js --format=iife --target=es2020",
-    "watch": "npm run build && (npm run build:content -- --watch & npm run build:popup -- --watch & npm run build:bg -- --watch & npm run build:picker -- --watch & npm run build:regret -- --watch)",
+    "build:redlist": "esbuild src/redlist/inject.ts --bundle --outfile=dist/redlist.js --format=iife --target=es2020",
+    "watch": "npm run build && (npm run build:content -- --watch & npm run build:popup -- --watch & npm run build:bg -- --watch & npm run build:picker -- --watch & npm run build:regret -- --watch & npm run build:redlist -- --watch)",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],

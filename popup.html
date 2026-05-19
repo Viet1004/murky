@@ -286,6 +286,38 @@
     <div id="savedSitesList" style="display:none; margin-top:10px;"></div>
   </div>
 
+  <!-- Red list (block-on-schedule) -->
+  <div class="card" id="redListCard" style="margin-top: 12px;">
+    <div style="font-size:13px; font-weight:500; margin-bottom: 4px;">Block sites on a schedule</div>
+    <div class="meta" style="margin-bottom: 10px;">
+      Cover entire sites during a time window — e.g. block facebook.com
+      from 9 AM to 5 PM every day. A short "continue anyway" bypass is
+      always available.
+    </div>
+    <div id="redListList" style="margin-bottom: 8px;"></div>
+    <button class="btn" id="redListAddBtn" style="font-size:12px; padding:6px 10px;">Add site</button>
+    <div id="redListForm" style="display:none; margin-top:10px; padding:10px; background:var(--cream); border:1px solid var(--cream-dark); border-radius:8px;">
+      <div class="field-label">Hostname (e.g. facebook.com)</div>
+      <input id="redListHostInput" type="text" placeholder="facebook.com" style="width:100%; padding:6px 8px; border:1px solid var(--cream-dark); border-radius:6px; font-family:ui-monospace,monospace; font-size:12px; margin-bottom:8px;" />
+      <div class="field-label">Optional label</div>
+      <input id="redListLabelInput" type="text" placeholder="Social break" style="width:100%; padding:6px 8px; border:1px solid var(--cream-dark); border-radius:6px; font-size:12px; margin-bottom:8px;" />
+      <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <div style="flex:1;">
+          <div class="field-label">From</div>
+          <input id="redListStartInput" type="time" value="09:00" style="width:100%; padding:6px 8px; border:1px solid var(--cream-dark); border-radius:6px; font-size:12px;" />
+        </div>
+        <div style="flex:1;">
+          <div class="field-label">Until</div>
+          <input id="redListEndInput" type="time" value="17:00" style="width:100%; padding:6px 8px; border:1px solid var(--cream-dark); border-radius:6px; font-size:12px;" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button class="btn btn-primary" id="redListSaveBtn" style="font-size:12px; padding:6px 10px;">Save</button>
+        <button class="btn" id="redListCancelBtn" style="font-size:12px; padding:6px 10px;">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <div class="card" id="focusCard" style="margin-top: 12px;">
     <div class="focus-row">
       <div class="field-label">Focus prompt</div>

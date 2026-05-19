@@ -472,6 +472,10 @@ chrome.webNavigation.onCommitted.addListener((details) => {
     return;
   }
   void injectMaskFirstCss(details.tabId, origin);
+  // Red list runs independently. The overlay covers the page on top of
+  // anything mask-first does, so the two features compose without
+  // coordination.
+  void maybeBlockRedList(details.tabId, details.url);
 });
 
 function originToMatchPattern(origin: string): string | null {
@@ -588,6 +592,75 @@ function reportPreloadError(error: string): void {
   });
 }
 
+// --- Red list (block-on-schedule) --------------------------------------
+//
+// On every top-level navigation, check whether the destination hostname
+// matches a user-defined red-list entry whose time window is currently
+// active. If so, inject a full-page overlay (dist/redlist.js) that
+// pauses the site and offers a temporary bypass.
+//
+// Storage is read on every navigation rather than cached in memory
+// because the SW restarts and edits in the popup must take effect
+// immediately. A typical red list is tiny (<20 entries), so the storage
+// read is negligible.
+
+import { loadEntries as loadRedListEntries, loadBypasses, setBypass, activeBypass } from "./redlist/store";
+import { findActiveBlock, formatWindowEnd } from "./redlist/schedule";
+
+const BYPASS_MINUTES = 5;
+
+async function maybeBlockRedList(tabId: number, url: string): Promise<void> {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return;
+  }
+  if (!hostname) return;
+
+  // Honor the global enable toggle — paused extension shouldn't block sites.
+  const enabled = await storageGet<{ murkyEnabled?: boolean }>(["murkyEnabled"]);
+  if (enabled.murkyEnabled === false) return;
+
+  const entries = await loadRedListEntries();
+  if (entries.length === 0) return;
+  const now = new Date();
+  const match = findActiveBlock(hostname, entries, now);
+  if (!match) return;
+
+  const bypasses = await loadBypasses();
+  if (activeBypass(match.entry.hostnamePattern, bypasses)) return;
+
+  const payload = {
+    hostnamePattern: match.entry.hostnamePattern,
+    label: match.entry.label,
+    endsAt: formatWindowEnd(now, match.window),
+    bypassMinutes: BYPASS_MINUTES,
+  };
+
+  try {
+    // Set payload then load the overlay bundle — same two-phase pattern
+    // we use for the regret prompt.
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      func: (p: typeof payload) => {
+        (window as unknown as { __MURKY_REDLIST_PAYLOAD__: typeof p }).__MURKY_REDLIST_PAYLOAD__ = p;
+      },
+      args: [payload],
+    });
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["dist/redlist.js"],
+    });
+  } catch (err) {
+    // CSP-locked sites or detached tabs can throw; silent fallback —
+    // the user just sees the page normally. Acceptable for a feature
+    // that's a self-control aid rather than a security boundary.
+    console.debug("[murky background] redlist inject failed", err);
+  }
+}
+
 // --- Server forwarding for regret events --------------------------------
 
 async function forwardRegretEvent(event: RegretEvent): Promise<void> {
@@ -702,6 +775,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === "run-picker") {
     void runPicker().then(sendResponse);
     return true;
+  }
+
+  if (message.type === "redlist-bypass") {
+    const pattern = typeof message.hostnamePattern === "string" ? message.hostnamePattern : "";
+    const minutes =
+      typeof message.minutes === "number" && message.minutes > 0 ? message.minutes : BYPASS_MINUTES;
+    if (!pattern) {
+      sendResponse({ ok: false, error: "missing hostnamePattern" });
+      return false;
+    }
+    void setBypass({
+      hostnamePattern: pattern,
+      expiresAt: Date.now() + minutes * 60_000,
+    });
+    sendResponse({ ok: true });
+    return false;
   }
 
   return false;

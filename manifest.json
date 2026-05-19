@@ -65,7 +65,8 @@
         "styles.css",
         "dist/content.js",
         "dist/picker.js",
-        "dist/regret.js"
+        "dist/regret.js",
+        "dist/redlist.js"
       ],
       "matches": ["<all_urls>"]
     }

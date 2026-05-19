@@ -628,6 +628,150 @@ forgetSiteBtn.addEventListener("click", async () => {
 
 void refreshPickerStatus();
 void refreshSavedSites();
+void refreshRedList();
+
+// ---------- Red list (block sites on a schedule) ----------
+
+import {
+  loadEntries as loadRedListEntries,
+  upsertEntry as upsertRedListEntry,
+  deleteEntry as deleteRedListEntry,
+  newId as newRedListId,
+} from "./redlist/store";
+import type { RedListEntry } from "./redlist/types";
+
+const redListList = document.getElementById("redListList") as HTMLDivElement;
+const redListAddBtn = document.getElementById("redListAddBtn") as HTMLButtonElement;
+const redListForm = document.getElementById("redListForm") as HTMLDivElement;
+const redListHostInput = document.getElementById("redListHostInput") as HTMLInputElement;
+const redListLabelInput = document.getElementById("redListLabelInput") as HTMLInputElement;
+const redListStartInput = document.getElementById("redListStartInput") as HTMLInputElement;
+const redListEndInput = document.getElementById("redListEndInput") as HTMLInputElement;
+const redListSaveBtn = document.getElementById("redListSaveBtn") as HTMLButtonElement;
+const redListCancelBtn = document.getElementById("redListCancelBtn") as HTMLButtonElement;
+
+function parseHM(value: string): { h: number; m: number } | null {
+  // <input type="time"> emits "HH:MM" or "HH:MM:SS"
+  const match = /^(\d{2}):(\d{2})/.exec(value);
+  if (!match) return null;
+  const h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+  return { h, m };
+}
+
+function fmtHM(h: number, m: number): string {
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function normalizeHostname(input: string): string {
+  let s = input.trim().toLowerCase();
+  // Allow users to paste a full URL; keep only hostname.
+  try {
+    if (s.includes("://")) s = new URL(s).hostname;
+  } catch {
+    /* ignore — treat as plain hostname */
+  }
+  s = s.replace(/^www\./, "");
+  return s;
+}
+
+async function refreshRedList(): Promise<void> {
+  const entries = await loadRedListEntries();
+  if (entries.length === 0) {
+    redListList.innerHTML = `<div class="meta" style="margin:0;">No sites blocked. Add one to start.</div>`;
+    return;
+  }
+  redListList.innerHTML = entries
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((e) => {
+      const w = e.windows[0];
+      const label = e.label?.trim() || e.hostnamePattern;
+      const range = w ? `${fmtHM(w.startHour, w.startMinute)}–${fmtHM(w.endHour, w.endMinute)}` : "no window";
+      return `
+        <div class="redlist-row" data-id="${escapeHtml(e.id)}" style="display:flex; align-items:center; gap:6px; padding:6px 0; border-top:1px solid var(--cream-dark);">
+          <label class="switch" style="width:30px; height:18px; flex:0 0 auto;">
+            <input type="checkbox" class="redlist-toggle" data-id="${escapeHtml(e.id)}" ${e.enabled ? "checked" : ""}>
+            <span class="slider" style="border-radius:18px;"></span>
+          </label>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:12px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(label)}</div>
+            <div class="meta" style="margin-top:1px;">${escapeHtml(e.hostnamePattern)} • ${escapeHtml(range)}</div>
+          </div>
+          <button class="btn redlist-delete" data-id="${escapeHtml(e.id)}" style="padding:4px 8px; font-size:11px; flex:0 0 auto; width:auto;">×</button>
+        </div>
+      `;
+    })
+    .join("");
+
+  redListList.querySelectorAll<HTMLInputElement>(".redlist-toggle").forEach((cb) => {
+    cb.addEventListener("change", async () => {
+      const id = cb.dataset.id;
+      if (!id) return;
+      const all = await loadRedListEntries();
+      const found = all.find((e) => e.id === id);
+      if (!found) return;
+      found.enabled = cb.checked;
+      await upsertRedListEntry(found);
+    });
+  });
+  redListList.querySelectorAll<HTMLButtonElement>(".redlist-delete").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      if (!id) return;
+      if (!window.confirm("Delete this blocked site?")) return;
+      await deleteRedListEntry(id);
+      await refreshRedList();
+    });
+  });
+}
+
+redListAddBtn.addEventListener("click", () => {
+  redListForm.style.display = "block";
+  redListHostInput.focus();
+});
+
+redListCancelBtn.addEventListener("click", () => {
+  redListForm.style.display = "none";
+  redListHostInput.value = "";
+  redListLabelInput.value = "";
+});
+
+redListSaveBtn.addEventListener("click", async () => {
+  const hostname = normalizeHostname(redListHostInput.value);
+  const label = redListLabelInput.value.trim() || undefined;
+  const start = parseHM(redListStartInput.value);
+  const end = parseHM(redListEndInput.value);
+  if (!hostname) {
+    window.alert("Hostname is required (e.g. facebook.com).");
+    return;
+  }
+  if (!start || !end) {
+    window.alert("Pick a valid start and end time.");
+    return;
+  }
+  const entry: RedListEntry = {
+    id: newRedListId(),
+    hostnamePattern: hostname,
+    label,
+    enabled: true,
+    createdAt: Date.now(),
+    windows: [
+      {
+        startHour: start.h,
+        startMinute: start.m,
+        endHour: end.h,
+        endMinute: end.m,
+      },
+    ],
+  };
+  await upsertRedListEntry(entry);
+  redListForm.style.display = "none";
+  redListHostInput.value = "";
+  redListLabelInput.value = "";
+  await refreshRedList();
+});
 
 // ---------- Saved sites manager ----------
 
