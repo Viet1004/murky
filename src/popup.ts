@@ -43,7 +43,7 @@ const savedSitesSummary = document.getElementById("savedSitesSummary") as HTMLDi
 const savedSitesChevron = document.getElementById("savedSitesChevron") as HTMLSpanElement;
 const savedSitesList = document.getElementById("savedSitesList") as HTMLDivElement;
 
-const DEFAULT_SERVER_URL = "http://localhost:5173";
+const DEFAULT_SERVER_URL = "https://gum2fjwx5t.ap-southeast-1.awsapprunner.com";
 const DEFAULT_SCORER_ID = "random";
 
 interface UserProfile {
