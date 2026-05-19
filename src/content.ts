@@ -124,6 +124,13 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
   // Otherwise cards present at initial paint get processed with a null
   // scorer, marked as processed, and never re-evaluated — only cards
   // added later (via scroll → observer) would ever get masked.
+  // Load scorer/profile/revealed-set AND the persistent decision cache
+  // BEFORE the first scan. Without awaiting decisionCache.ensureLoaded()
+  // here, the first processAllCards() runs before `persisted` is
+  // populated, so cache.get() always misses and cache.set() early-returns
+  // (silently dropping first-page writes). Result: the persistent cache
+  // would never warm on a fresh tab. Bundling it into the Promise.all
+  // adds at most one storage round-trip to startup.
   const [scorerLoaded, profileLoaded, revealed] = await Promise.all([
     getActiveScorer(),
     getProfile(),
@@ -132,18 +139,16 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
         resolve((r.murkyRevealed as string[] | undefined) ?? []);
       });
     }),
+    decisionCache.ensureLoaded(),
   ]);
   let scorer: Scorer = scorerLoaded;
   let profile: UserProfile = profileLoaded;
   let scorerConfig = await getScorerConfig(scorer.id);
   revealedCards = new Set(revealed);
 
-  // Load the persistent decision cache before the first scan so cache
-  // hits can short-circuit slow scorers from the very first card. The
   // promptHash is recomputed whenever the prompt or scorer changes
   // (which naturally invalidates all cache entries because the key
   // includes both).
-  void decisionCache.ensureLoaded();
   let promptHash = shortHash((profile.prompt ?? "").trim());
 
   console.debug("[murky] active scorer:", scorer.id, "profile:", profile);

@@ -65,6 +65,29 @@ class DecisionCache {
         if (!this.persisted.entries || !Array.isArray(this.persisted.order)) {
           this.persisted = { entries: {}, order: [] };
         }
+        // Enforce the LRU cap on load too. Without this, a store that
+        // somehow ended up over cap (older build, MAX_ENTRIES lowered,
+        // partial write that left order/entries out of sync) would only
+        // shrink via future set() calls. Trim from the oldest end so we
+        // keep the most-recently-used entries.
+        if (this.persisted.order.length > MAX_ENTRIES) {
+          const overflow = this.persisted.order.length - MAX_ENTRIES;
+          const evicted = this.persisted.order.splice(0, overflow);
+          for (const key of evicted) delete this.persisted.entries[key];
+          this.dirty = true;
+          this.scheduleFlush();
+        }
+        // Also drop any entries that have no matching order slot (and
+        // vice versa) so the two structures stay consistent — same
+        // partial-write defense.
+        const orderSet = new Set(this.persisted.order);
+        for (const key of Object.keys(this.persisted.entries)) {
+          if (!orderSet.has(key)) {
+            delete this.persisted.entries[key];
+            this.dirty = true;
+          }
+        }
+        if (this.dirty) this.scheduleFlush();
         resolve();
       });
     });
