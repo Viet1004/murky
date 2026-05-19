@@ -38,8 +38,9 @@ import type { SiteSelectorConfig } from "./picker/store";
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   "http://localhost:5173",
   "http://localhost:8000",
+  "https://gum2fjwx5t.ap-southeast-1.awsapprunner.com",
 ]);
-const DEFAULT_SERVER_URL = "http://localhost:5173";
+const DEFAULT_SERVER_URL = "https://gum2fjwx5t.ap-southeast-1.awsapprunner.com";
 const SERVER_URL_KEY = "murkyServerUrl";
 const AUTH_TOKEN_KEY = "murkyAuthToken";
 const AUTH_EMAIL_KEY = "murkyAuthEmail";

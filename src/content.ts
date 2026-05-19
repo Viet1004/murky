@@ -34,6 +34,7 @@ import {
   UserProfile,
 } from "./scoring";
 import { decisionCache, makeCacheKey, shortHash } from "./scoring/cache";
+import { timings } from "./scoring/timings";
 
 // Expose a preload handle so the popup's "Download now" button (routed
 // through background → executeScript) can warm the embedding model
@@ -153,7 +154,7 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     // processedCards. Re-run a full scan now so they get a real verdict
     // instead of staying permanently unmasked.
     console.debug("[murky] embedding model ready — re-scoring deferred cards");
-    processAllCards();
+    void processAllCards();
   });
 
   chrome.storage.onChanged.addListener(async (c) => {
@@ -218,7 +219,9 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     if (processedCards.has(card)) return;
 
     const productId: ProductId | null = getProductId(card);
-    const features = adapter.scrapeFeatures(card);
+    const features = timings.measureSync("scrape", () =>
+      adapter.scrapeFeatures(card)
+    );
 
     // Shopee hydrates card text after the element enters the DOM. If we
     // run before hydration, features.title is null and we'd end up with
@@ -244,13 +247,17 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
       wasMasked = cached.shouldMask;
     } else {
       try {
-        const decision = await scorer.score({
-          productId,
-          features,
-          profile,
-          config: scorerConfig,
-          pageUrl: window.location.href,
-        });
+        const decision = await timings.measure("score", () =>
+          Promise.resolve(
+            scorer.score({
+              productId,
+              features,
+              profile,
+              config: scorerConfig,
+              pageUrl: window.location.href,
+            })
+          )
+        );
         wasMasked = decision.shouldMask;
         // Cards scored during model warm-up should be retried once the
         // model is ready (see onModelReady above). Don't poison them by
@@ -328,13 +335,15 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
       },
     };
 
-    const factory = registry.pick(ctx);
-    const mask = factory.create(ctx);
-    mask.mount(card, ctx);
-    maskedCards.add(card);
-
-    const isAlreadyRevealed = cardId !== null && revealedCards.has(cardId);
-    mask.setVisible(!isAlreadyRevealed);
+    const mask = timings.measureSync("mount", () => {
+      const factory = registry.pick(ctx);
+      const m = factory.create(ctx);
+      m.mount(card, ctx);
+      maskedCards.add(card);
+      const isAlreadyRevealed = cardId !== null && revealedCards.has(cardId);
+      m.setVisible(!isAlreadyRevealed);
+      return m;
+    });
 
     cardMasks.set(card, mask);
 
@@ -383,17 +392,27 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     }
   }
 
-  function processAllCards(): void {
+  async function processAllCards(): Promise<void> {
     const cards = findProductCards();
-    for (const card of cards) {
-      const cardId = getCardId(card);
-      // Fire-and-forget — scoring is async, cards are independent.
-      void attachMaskToCard(card, cardId);
+    if (cards.length === 0) return;
+    const t0 = performance.now();
+    // Cards are scored concurrently in JS, but the embedding scorer's
+    // wasm inference is single-threaded → they effectively serialize.
+    // Awaiting all settled lets us flush a coherent timing summary.
+    await Promise.allSettled(
+      cards.map((card) => attachMaskToCard(card, getCardId(card)))
+    );
+    if (timings.isEnabled()) {
+      const wall = performance.now() - t0;
+      console.log(
+        `[murky timing] page scan: ${cards.length} cards, wall=${wall.toFixed(0)}ms`
+      );
+      timings.flush(`per-card breakdown (${cards.length} cards)`);
     }
   }
 
   // --- Initial scan ---
-  processAllCards();
+  void processAllCards();
 
   // --- MutationObserver for lazy-rendered cards ---
   let isProcessing = false;
@@ -420,9 +439,12 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
     if (shouldProcess) {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
+        // processAllCards is now async; keep the re-entrancy guard
+        // truthful by clearing it only after the scan resolves.
         isProcessing = true;
-        processAllCards();
-        isProcessing = false;
+        void processAllCards().finally(() => {
+          isProcessing = false;
+        });
       }, 300);
     }
   });
