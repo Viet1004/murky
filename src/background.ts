@@ -612,6 +612,48 @@ import {
   clearExpiredBypasses,
 } from "./redlist/store";
 import { findActiveBlock, formatWindowEnd } from "./redlist/schedule";
+import { loadActiveCollection } from "./packs";
+import type { CollectionDetail, ServerMask } from "./packs";
+
+/**
+ * Pull a mask spec for the red-list overlay. Coherent with the
+ * per-element story: the same image-stack masks that cover individual
+ * cards now cover the whole viewport when a site is blocked.
+ *
+ * Source priority:
+ *   1. A random image-stack mask from the user's active collection.
+ *   2. Bundled fallback icons (icons/yao_ming.jpg + lol_meme.jpg +
+ *      y_r_u_g.jpg), so offline / signed-out installs still see real
+ *      mask art instead of a generic card.
+ *
+ * The returned layers are top-to-bottom (last URL = visible first,
+ * peeled away first) — same convention as ImageStackMask.
+ */
+async function pickRedListMaskLayers(): Promise<string[]> {
+  try {
+    const col: CollectionDetail | null = await loadActiveCollection();
+    if (col && col.masks.length > 0) {
+      const usable = col.masks.filter(
+        (m: ServerMask) => m.type === "image-stack" && m.layers.length > 0
+      );
+      if (usable.length > 0) {
+        const pick = usable[Math.floor(Math.random() * usable.length)];
+        return pick.layers
+          .slice()
+          .sort((a, b) => a.position - b.position)
+          .map((l) => l.url);
+      }
+    }
+  } catch (err) {
+    console.debug("[murky background] redlist collection load failed", err);
+  }
+  // Bundled fallback — same set the per-element registry uses.
+  return [
+    chrome.runtime.getURL("icons/yao_ming.jpg"),
+    chrome.runtime.getURL("icons/lol_meme.jpg"),
+    chrome.runtime.getURL("icons/y_r_u_g.jpg"),
+  ];
+}
 
 // Garbage-collect expired bypass records once on SW startup so a
 // long-idle install with stale bypasses still cleans up even if the
@@ -643,11 +685,17 @@ async function maybeBlockRedList(tabId: number, url: string): Promise<void> {
   const bypasses = await loadBypasses();
   if (activeBypass(match.entry.hostnamePattern, bypasses)) return;
 
+  const maskLayers = await pickRedListMaskLayers();
+
   const payload = {
     hostnamePattern: match.entry.hostnamePattern,
     label: match.entry.label,
     endsAt: formatWindowEnd(now, match.window),
     bypassMinutes: BYPASS_MINUTES,
+    // Same mask spec the per-element pipeline uses: top-to-bottom
+    // image URLs. The overlay peels them one click at a time, then
+    // reveals the bypass / "take me back" controls as the endgame.
+    maskLayers,
   };
 
   try {
