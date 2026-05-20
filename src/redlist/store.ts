@@ -57,12 +57,27 @@ export async function loadBypasses(): Promise<Record<string, RedListBypass>> {
   return r[RED_LIST_BYPASS_KEY] ?? {};
 }
 
+/**
+ * Writes a bypass and opportunistically garbage-collects expired ones.
+ * Without this sweep, bypasses accumulate forever in chrome.storage
+ * even though activeBypass() refuses to honor them — small but
+ * principled leak.
+ */
 export async function setBypass(bypass: RedListBypass): Promise<void> {
   const all = await loadBypasses();
+  const now = Date.now();
+  for (const k of Object.keys(all)) {
+    if (all[k].expiresAt <= now) delete all[k];
+  }
   all[bypass.hostnamePattern] = bypass;
   await storageSet({ [RED_LIST_BYPASS_KEY]: all });
 }
 
+/**
+ * Stand-alone sweep, called once at SW startup (background.ts) so a
+ * long-idle install with stale bypasses still gets cleaned up even if
+ * the user never adds a new one.
+ */
 export async function clearExpiredBypasses(): Promise<void> {
   const all = await loadBypasses();
   const now = Date.now();

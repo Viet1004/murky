@@ -19,6 +19,14 @@ import {
   SiteSelectorConfig,
 } from "./picker/store";
 
+import {
+  loadEntries as loadRedListEntries,
+  upsertEntry as upsertRedListEntry,
+  deleteEntry as deleteRedListEntry,
+  newId as newRedListId,
+} from "./redlist/store";
+import type { RedListEntry } from "./redlist/types";
+
 const enableToggle = document.getElementById("enableToggle") as HTMLInputElement;
 const serverUrlInput = document.getElementById("serverUrlInput") as HTMLInputElement;
 const browseBtn = document.getElementById("browseBtn") as HTMLButtonElement;
@@ -632,14 +640,6 @@ void refreshRedList();
 
 // ---------- Red list (block sites on a schedule) ----------
 
-import {
-  loadEntries as loadRedListEntries,
-  upsertEntry as upsertRedListEntry,
-  deleteEntry as deleteRedListEntry,
-  newId as newRedListId,
-} from "./redlist/store";
-import type { RedListEntry } from "./redlist/types";
-
 const redListList = document.getElementById("redListList") as HTMLDivElement;
 const redListAddBtn = document.getElementById("redListAddBtn") as HTMLButtonElement;
 const redListForm = document.getElementById("redListForm") as HTMLDivElement;
@@ -732,11 +732,21 @@ redListAddBtn.addEventListener("click", () => {
   redListHostInput.focus();
 });
 
-redListCancelBtn.addEventListener("click", () => {
+/**
+ * Reset every form field to its initial state. Without resetting the
+ * <input type="time"> fields too, edits to "From"/"Until" persisted
+ * across Cancel → re-open, which felt buggy ("I set 22:00 → 02:00,
+ * cancelled, came back, and the wrong times were still there").
+ */
+function resetRedListForm(): void {
   redListForm.style.display = "none";
   redListHostInput.value = "";
   redListLabelInput.value = "";
-});
+  redListStartInput.value = "09:00";
+  redListEndInput.value = "17:00";
+}
+
+redListCancelBtn.addEventListener("click", resetRedListForm);
 
 redListSaveBtn.addEventListener("click", async () => {
   const hostname = normalizeHostname(redListHostInput.value);
@@ -767,9 +777,7 @@ redListSaveBtn.addEventListener("click", async () => {
     ],
   };
   await upsertRedListEntry(entry);
-  redListForm.style.display = "none";
-  redListHostInput.value = "";
-  redListLabelInput.value = "";
+  resetRedListForm();
   await refreshRedList();
 });
 

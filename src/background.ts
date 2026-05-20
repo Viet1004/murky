@@ -604,8 +604,20 @@ function reportPreloadError(error: string): void {
 // immediately. A typical red list is tiny (<20 entries), so the storage
 // read is negligible.
 
-import { loadEntries as loadRedListEntries, loadBypasses, setBypass, activeBypass } from "./redlist/store";
+import {
+  loadEntries as loadRedListEntries,
+  loadBypasses,
+  setBypass,
+  activeBypass,
+  clearExpiredBypasses,
+} from "./redlist/store";
 import { findActiveBlock, formatWindowEnd } from "./redlist/schedule";
+
+// Garbage-collect expired bypass records once on SW startup so a
+// long-idle install with stale bypasses still cleans up even if the
+// user never adds a new one. Each setBypass() write also sweeps as it
+// goes — this is the catch-all for the "never bypass again" case.
+void clearExpiredBypasses();
 
 const BYPASS_MINUTES = 5;
 
