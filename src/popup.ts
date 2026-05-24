@@ -47,6 +47,7 @@ const statusMeta = document.getElementById("statusMeta") as HTMLDivElement;
 const behaviorToggle = document.getElementById("behaviorToggle") as HTMLInputElement;
 const clearBehaviorBtn = document.getElementById("clearBehaviorBtn") as HTMLButtonElement;
 const focusPromptInput = document.getElementById("focusPromptInput") as HTMLTextAreaElement;
+const avoidPromptInput = document.getElementById("avoidPromptInput") as HTMLTextAreaElement;
 const scorerSelect = document.getElementById("scorerSelect") as HTMLSelectElement;
 const pickElementBtn = document.getElementById("pickElementBtn") as HTMLButtonElement;
 const forgetSiteBtn = document.getElementById("forgetSiteBtn") as HTMLButtonElement;
@@ -63,6 +64,7 @@ const DEFAULT_SCORER_ID = "random";
 
 interface UserProfile {
   prompt?: string;
+  avoidPrompt?: string;
   blockedKeywords?: string[];
   focusKeywords?: string[];
   budgetCeilingVnd?: number;
@@ -87,6 +89,7 @@ chrome.storage.local.get(
     syncToggle.checked = result.murkySyncEnabled === true;
     const profile = (result.murkyProfile as UserProfile | undefined) ?? {};
     focusPromptInput.value = profile.prompt ?? "";
+    avoidPromptInput.value = profile.avoidPrompt ?? "";
     scorerSelect.value =
       (result.murkyScorerId as string | undefined) ?? DEFAULT_SCORER_ID;
     refreshStatus();
@@ -462,6 +465,17 @@ focusPromptInput.addEventListener("change", () => {
   chrome.storage.local.get(["murkyProfile"], (r) => {
     const existing = (r.murkyProfile as UserProfile | undefined) ?? {};
     const next: UserProfile = { ...existing, prompt: focusPromptInput.value.trim() || undefined };
+    chrome.storage.local.set({ murkyProfile: next }, reloadActiveTab);
+  });
+});
+
+avoidPromptInput.addEventListener("change", () => {
+  chrome.storage.local.get(["murkyProfile"], (r) => {
+    const existing = (r.murkyProfile as UserProfile | undefined) ?? {};
+    const next: UserProfile = {
+      ...existing,
+      avoidPrompt: avoidPromptInput.value.trim() || undefined,
+    };
     chrome.storage.local.set({ murkyProfile: next }, reloadActiveTab);
   });
 });

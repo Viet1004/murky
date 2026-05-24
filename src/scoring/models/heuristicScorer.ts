@@ -5,12 +5,13 @@ import { Scorer, ScoringContext, MaskDecision } from "../types";
  * Synchronous, zero dependencies — ships day one and acts as the fallback
  * while heavier scorers warm up.
  *
- * Decision: mask = NOT in user's focus.
- *  - blockedKeywords match → always mask
- *  - focusKeywords match    → never mask
- *  - over budget            → mask
- *  - prompt token overlap   → keep (mask if zero overlap)
- *  - no prompt set          → never mask (we have nothing to filter on)
+ * Decision: mask = NOT in user's focus OR matches user's avoid prompt.
+ *  - blockedKeywords match    → always mask
+ *  - focusKeywords match      → never mask
+ *  - over budget              → mask
+ *  - avoid prompt token hit   → mask (any title token overlaps the avoid prompt)
+ *  - focus prompt no overlap  → mask (title doesn't touch the focus topic)
+ *  - neither prompt set       → never mask
  */
 export const heuristicScorer: Scorer = {
   id: "heuristic",
@@ -42,17 +43,28 @@ export const heuristicScorer: Scorer = {
       }
     }
 
-    const prompt = profile.prompt?.trim();
-    if (!prompt) {
+    const focusPrompt = profile.prompt?.trim();
+    const avoidPrompt = profile.avoidPrompt?.trim();
+    if (!focusPrompt && !avoidPrompt) {
       return decision(false, 0, "no-prompt");
     }
     if (!title) {
-      return decision(true, 1, "no-title");
+      // No title: only mask defensively when there's a focus we want to verify.
+      return decision(Boolean(focusPrompt), focusPrompt ? 1 : 0, "no-title");
     }
 
-    const overlap = tokenOverlap(prompt, title);
-    // 0 overlap → fully off-focus → mask. Threshold tuneable later.
-    return decision(overlap < 0.15, 1 - overlap, `overlap=${overlap.toFixed(2)}`);
+    const avoidOverlap = avoidPrompt ? tokenOverlap(avoidPrompt, title) : 0;
+    const focusOverlap = focusPrompt ? tokenOverlap(focusPrompt, title) : 1;
+
+    const hitsAvoid = avoidPrompt ? avoidOverlap > 0 : false;
+    const offFocus = focusPrompt ? focusOverlap < 0.15 : false;
+    const shouldMask = hitsAvoid || offFocus;
+    const score = Math.max(avoidOverlap, 1 - focusOverlap);
+
+    const parts: string[] = [];
+    if (focusPrompt) parts.push(`focus=${focusOverlap.toFixed(2)}`);
+    if (avoidPrompt) parts.push(`avoid=${avoidOverlap.toFixed(2)}`);
+    return decision(shouldMask, score, parts.join(" "));
   },
 };
 

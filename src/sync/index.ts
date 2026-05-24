@@ -60,6 +60,7 @@ const DEFAULT_SERVER_URL = "https://gum2fjwx5t.ap-southeast-1.awsapprunner.com";
 
 interface UserProfile {
   prompt?: string;
+  avoidPrompt?: string;
 }
 
 interface ServerSiteSelector {
@@ -76,6 +77,7 @@ interface ServerSiteSelector {
 
 interface ServerPreferences {
   focus_prompt: string | null;
+  avoid_prompt: string | null;
   scorer_id: string | null;
   active_collection_slug: string | null;
   updated_at: string | null;
@@ -186,6 +188,7 @@ export async function pushPreferences(): Promise<void> {
     [ACTIVE_PACK_KEY]?: string;
   }>([PROFILE_KEY, SCORER_ID_KEY, ACTIVE_PACK_KEY]);
   const focusPrompt = r[PROFILE_KEY]?.prompt ?? null;
+  const avoidPrompt = r[PROFILE_KEY]?.avoidPrompt ?? null;
   const scorerId = r[SCORER_ID_KEY] ?? null;
   const activeSlug = r[ACTIVE_PACK_KEY] ?? null;
   try {
@@ -194,6 +197,7 @@ export async function pushPreferences(): Promise<void> {
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({
         focus_prompt: focusPrompt,
+        avoid_prompt: avoidPrompt,
         scorer_id: scorerId,
         active_collection_slug: activeSlug,
       }),
@@ -202,6 +206,7 @@ export async function pushPreferences(): Promise<void> {
     console.info(
       `[murky sync] PUT /me/preferences — HTTP ${res.status} ` +
       `(focus_prompt=${focusPrompt ? "set" : "null"}, ` +
+      `avoid_prompt=${avoidPrompt ? "set" : "null"}, ` +
       `scorer_id=${scorerId ?? "null"}, ` +
       `active_collection_slug=${activeSlug ?? "null"})`
     );
@@ -332,10 +337,12 @@ async function reconcilePreferences(
   }>([PROFILE_KEY, SCORER_ID_KEY, ACTIVE_PACK_KEY, PREFS_UPDATED_AT_KEY]);
   const serverHasPrefs =
     serverPrefs.focus_prompt !== null ||
+    serverPrefs.avoid_prompt !== null ||
     serverPrefs.scorer_id !== null ||
     serverPrefs.active_collection_slug !== null;
   const localHasValues = Boolean(
     localPrefs[PROFILE_KEY]?.prompt ||
+      localPrefs[PROFILE_KEY]?.avoidPrompt ||
       localPrefs[SCORER_ID_KEY] ||
       localPrefs[ACTIVE_PACK_KEY]
   );
@@ -346,6 +353,8 @@ async function reconcilePreferences(
     const profile: UserProfile = { ...(localPrefs[PROFILE_KEY] ?? {}) };
     if (serverPrefs.focus_prompt !== null) profile.prompt = serverPrefs.focus_prompt;
     else delete profile.prompt;
+    if (serverPrefs.avoid_prompt !== null) profile.avoidPrompt = serverPrefs.avoid_prompt;
+    else delete profile.avoidPrompt;
     const next: Record<string, unknown> = {
       [PROFILE_KEY]: profile,
       [PREFS_UPDATED_AT_KEY]: msFromIso(serverPrefs.updated_at) || Date.now(),
@@ -400,6 +409,7 @@ async function replaceLocalWithServer(
       const serverPrefs = (await res.json()) as ServerPreferences;
       const profile: UserProfile = {};
       if (serverPrefs.focus_prompt !== null) profile.prompt = serverPrefs.focus_prompt;
+      if (serverPrefs.avoid_prompt !== null) profile.avoidPrompt = serverPrefs.avoid_prompt;
       const next: Record<string, unknown> = {
         [PROFILE_KEY]: profile,
         [PREFS_UPDATED_AT_KEY]: msFromIso(serverPrefs.updated_at) || Date.now(),
@@ -457,7 +467,7 @@ export async function clearAllOnServer(): Promise<void> {
     await fetch(`${await serverUrl()}/me/preferences`, {
       method: "PUT",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ focus_prompt: null, scorer_id: null }),
+      body: JSON.stringify({ focus_prompt: null, avoid_prompt: null, scorer_id: null }),
     });
   } catch (e) {
     console.debug("[murky sync] clear: prefs failed", e);

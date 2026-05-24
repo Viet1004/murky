@@ -25,7 +25,8 @@ type Pipeline = (
 ) => Promise<{ data: Float32Array }>;
 
 const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
-const DEFAULT_THRESHOLD = 0.35;
+const DEFAULT_THRESHOLD = 0.75;
+const DEFAULT_AVOID_THRESHOLD = 0.6;
 const MODEL_STATUS_KEY = "murkyEmbeddingModelStatus";
 
 export type EmbeddingModelStatus =
@@ -46,7 +47,8 @@ export interface EmbeddingModelStatusRecord {
 
 let extractor: Pipeline | null = null;
 let loadingPromise: Promise<void> | null = null;
-let promptCache: { text: string; vec: Float32Array } | null = null;
+let focusPromptCache: { text: string; vec: Float32Array } | null = null;
+let avoidPromptCache: { text: string; vec: Float32Array } | null = null;
 let onReadyCallbacks: Array<() => void> = [];
 let currentStatus: EmbeddingModelStatusRecord = {
   status: "not-loaded",
@@ -158,14 +160,19 @@ export const embeddingScorer: Scorer = {
   displayName: "MiniLM embedding (focus matching)",
 
   async score(ctx: ScoringContext): Promise<MaskDecision> {
-    const prompt = ctx.profile.prompt?.trim();
+    const focusPrompt = ctx.profile.prompt?.trim();
+    const avoidPrompt = ctx.profile.avoidPrompt?.trim();
     const title = ctx.features.title?.trim();
 
-    if (!prompt) {
+    if (!focusPrompt && !avoidPrompt) {
       return { shouldMask: false, score: 0, reason: "no-prompt", modelId: this.id };
     }
     if (!title) {
-      return { shouldMask: true, score: 1, reason: "no-title", modelId: this.id };
+      // No title to score against: if the user set a focus we mask
+      // defensively (we can't tell whether the product fits); if they
+      // only set an avoid we leave it alone (no signal it matches).
+      const mask = Boolean(focusPrompt);
+      return { shouldMask: mask, score: mask ? 1 : 0, reason: "no-title", modelId: this.id };
     }
 
     // Kick off load on first call. Mask defensively-OFF until ready so
@@ -175,17 +182,46 @@ export const embeddingScorer: Scorer = {
       return { shouldMask: false, score: 0, reason: "model-loading", modelId: this.id };
     }
 
-    if (!promptCache || promptCache.text !== prompt) {
-      promptCache = { text: prompt, vec: await embed(prompt) };
-    }
     const titleVec = await embed(title);
-    const sim = timings.measureSync("cosine", () => cosine(promptCache!.vec, titleVec));
-    const threshold = (ctx.config.threshold as number | undefined) ?? DEFAULT_THRESHOLD;
+    const focusThreshold = (ctx.config.threshold as number | undefined) ?? DEFAULT_THRESHOLD;
+    const avoidThreshold =
+      (ctx.config.avoidThreshold as number | undefined) ?? DEFAULT_AVOID_THRESHOLD;
 
+    let simFocus: number | null = null;
+    if (focusPrompt) {
+      if (!focusPromptCache || focusPromptCache.text !== focusPrompt) {
+        focusPromptCache = { text: focusPrompt, vec: await embed(focusPrompt) };
+      }
+      simFocus = timings.measureSync("cosine", () =>
+        cosine(focusPromptCache!.vec, titleVec)
+      );
+    }
+
+    let simAvoid: number | null = null;
+    if (avoidPrompt) {
+      if (!avoidPromptCache || avoidPromptCache.text !== avoidPrompt) {
+        avoidPromptCache = { text: avoidPrompt, vec: await embed(avoidPrompt) };
+      }
+      simAvoid = timings.measureSync("cosine", () =>
+        cosine(avoidPromptCache!.vec, titleVec)
+      );
+    }
+
+    const offFocus = simFocus !== null && simFocus < focusThreshold;
+    const hitsAvoid = simAvoid !== null && simAvoid > avoidThreshold;
+    const shouldMask = offFocus || hitsAvoid;
+
+    const focusScore = simFocus !== null ? 1 - simFocus : 0;
+    const avoidScore = simAvoid !== null ? simAvoid : 0;
+    const score = Math.max(focusScore, avoidScore);
+
+    const parts: string[] = [];
+    if (simFocus !== null) parts.push(`focus=${simFocus.toFixed(3)}/thr=${focusThreshold}`);
+    if (simAvoid !== null) parts.push(`avoid=${simAvoid.toFixed(3)}/thr=${avoidThreshold}`);
     return {
-      shouldMask: sim < threshold,
-      score: 1 - sim,
-      reason: `cos=${sim.toFixed(3)} thr=${threshold}`,
+      shouldMask,
+      score,
+      reason: parts.join(" "),
       modelId: this.id,
     };
   },

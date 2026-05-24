@@ -7,6 +7,9 @@ import { ProductFeatures, ProductId } from "../types";
 export interface UserProfile {
   /** Free-text description of what the user wants to see (the focus). */
   prompt?: string;
+  /** Free-text description of what the user wants to avoid. Title close to
+   *  this is masked even if it also matches the focus prompt. */
+  avoidPrompt?: string;
   /** Hard-block keywords — title containing any of these always masks. */
   blockedKeywords?: string[];
   /** Hard-allow keywords — title containing any of these never masks. */

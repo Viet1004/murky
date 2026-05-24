@@ -149,7 +149,7 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
   // promptHash is recomputed whenever the prompt or scorer changes
   // (which naturally invalidates all cache entries because the key
   // includes both).
-  let promptHash = shortHash((profile.prompt ?? "").trim());
+  let promptHash = shortHash(((profile.prompt ?? "") + "|" + (profile.avoidPrompt ?? "")).trim());
 
   console.debug("[murky] active scorer:", scorer.id, "profile:", profile);
 
@@ -165,7 +165,7 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
   chrome.storage.onChanged.addListener(async (c) => {
     if (c.murkyProfile) {
       profile = (c.murkyProfile.newValue as UserProfile) ?? {};
-      promptHash = shortHash((profile.prompt ?? "").trim());
+      promptHash = shortHash(((profile.prompt ?? "") + "|" + (profile.avoidPrompt ?? "")).trim());
     }
     if (c.murkyScorerId) {
       scorer = await getActiveScorer();
