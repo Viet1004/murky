@@ -146,6 +146,30 @@ function cosine(a: Float32Array, b: Float32Array): number {
   return dot;
 }
 
+/**
+ * Tokenize text into a set of lowercased length>2 word tokens. Identical to
+ * the heuristic scorer's tokenizer — we duplicate locally rather than
+ * coupling the two modules over three lines.
+ */
+function tokenize(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2)
+  );
+}
+
+/** First token of `prompt` that appears in the lowercased `title`, else null. */
+function firstTokenHit(prompt: string, title: string): string | null {
+  const titleTokens = tokenize(title);
+  for (const tok of tokenize(prompt)) {
+    if (titleTokens.has(tok)) return tok;
+  }
+  return null;
+}
+
 /** Register a callback to fire once the model finishes loading. */
 export function onModelReady(cb: () => void): void {
   if (extractor) {
@@ -173,6 +197,20 @@ export const embeddingScorer: Scorer = {
       // only set an avoid we leave it alone (no signal it matches).
       const mask = Boolean(focusPrompt);
       return { shouldMask: mask, score: mask ? 1 : 0, reason: "no-title", modelId: this.id };
+    }
+
+    // Lexical pre-check. MiniLM-L6-v2 is English-trained and produces
+    // low-similarity scores for non-English text (e.g. Vietnamese "Đèn
+    // LED" vs "Đèn LED siêu sáng" hovers well below the avoid threshold),
+    // so a literal token match short-circuits the embedding. Avoid wins
+    // over focus when both hit, mirroring the cosine path below.
+    const avoidHit = avoidPrompt ? firstTokenHit(avoidPrompt, title) : null;
+    if (avoidHit) {
+      return { shouldMask: true, score: 1, reason: `avoid-keyword:${avoidHit}`, modelId: this.id };
+    }
+    const focusHit = focusPrompt ? firstTokenHit(focusPrompt, title) : null;
+    if (focusHit) {
+      return { shouldMask: false, score: 0, reason: `focus-keyword:${focusHit}`, modelId: this.id };
     }
 
     // Kick off load on first call. Mask defensively-OFF until ready so

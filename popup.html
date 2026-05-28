@@ -172,6 +172,44 @@
     select.focus-model:focus { border-color: var(--brand); }
     .focus-row + .focus-row { margin-top: 8px; }
 
+    /* Day-of-week chips (red list form) */
+    .day-chips { display: flex; gap: 4px; }
+    .day-chip {
+      flex: 1;
+      padding: 6px 0;
+      font-size: 11px;
+      font-weight: 500;
+      text-align: center;
+      background: #fff;
+      border: 1px solid var(--cream-dark);
+      border-radius: 6px;
+      color: var(--ink-muted);
+      cursor: pointer;
+      font-family: inherit;
+      transition: background .15s, color .15s, border-color .15s;
+    }
+    .day-chip:hover { border-color: var(--brand); }
+    .day-chip[aria-pressed="true"] {
+      background: var(--brand);
+      color: #fff;
+      border-color: var(--brand);
+    }
+    .day-presets {
+      display: flex; gap: 6px;
+      margin-top: 4px;
+      font-size: 11px;
+    }
+    .day-preset {
+      background: none;
+      border: none;
+      padding: 0;
+      color: var(--brand);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 11px;
+    }
+    .day-preset:hover { text-decoration: underline; }
+
     /* Section headings (Local / Online) */
     .section-heading {
       display: flex;
@@ -310,6 +348,21 @@
           <div class="field-label">Until</div>
           <input id="redListEndInput" type="time" value="17:00" style="width:100%; padding:6px 8px; border:1px solid var(--cream-dark); border-radius:6px; font-size:12px;" />
         </div>
+      </div>
+      <div class="field-label">Days</div>
+      <div class="day-chips" id="redListDays">
+        <button type="button" class="day-chip" data-day="1" aria-pressed="true">Mon</button>
+        <button type="button" class="day-chip" data-day="2" aria-pressed="true">Tue</button>
+        <button type="button" class="day-chip" data-day="3" aria-pressed="true">Wed</button>
+        <button type="button" class="day-chip" data-day="4" aria-pressed="true">Thu</button>
+        <button type="button" class="day-chip" data-day="5" aria-pressed="true">Fri</button>
+        <button type="button" class="day-chip" data-day="6" aria-pressed="true">Sat</button>
+        <button type="button" class="day-chip" data-day="0" aria-pressed="true">Sun</button>
+      </div>
+      <div class="day-presets">
+        <button type="button" class="day-preset" data-preset="daily">Daily</button>
+        <button type="button" class="day-preset" data-preset="weekdays">Weekdays</button>
+        <button type="button" class="day-preset" data-preset="weekends">Weekends</button>
       </div>
       <div class="row" style="margin-top:8px;">
         <button class="btn btn-primary" id="redListSaveBtn" style="font-size:12px; padding:6px 10px;">Save</button>

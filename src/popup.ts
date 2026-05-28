@@ -663,6 +663,60 @@ const redListStartInput = document.getElementById("redListStartInput") as HTMLIn
 const redListEndInput = document.getElementById("redListEndInput") as HTMLInputElement;
 const redListSaveBtn = document.getElementById("redListSaveBtn") as HTMLButtonElement;
 const redListCancelBtn = document.getElementById("redListCancelBtn") as HTMLButtonElement;
+const redListDays = document.getElementById("redListDays") as HTMLDivElement;
+
+const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** Read currently-pressed day chips. Returns 0..6 indices (Sun=0…Sat=6). */
+function readSelectedDays(): number[] {
+  const out: number[] = [];
+  redListDays.querySelectorAll<HTMLButtonElement>(".day-chip").forEach((btn) => {
+    if (btn.getAttribute("aria-pressed") === "true") {
+      out.push(parseInt(btn.dataset.day ?? "-1", 10));
+    }
+  });
+  return out.filter((d) => d >= 0 && d <= 6).sort();
+}
+
+function setSelectedDays(days: number[]): void {
+  const set = new Set(days);
+  redListDays.querySelectorAll<HTMLButtonElement>(".day-chip").forEach((btn) => {
+    const d = parseInt(btn.dataset.day ?? "-1", 10);
+    btn.setAttribute("aria-pressed", set.has(d) ? "true" : "false");
+  });
+}
+
+/**
+ * Render the days portion of an entry's window. Recognizes the common
+ * presets so the list stays readable; falls back to short day codes.
+ *  - undefined / all 7   → "every day"
+ *  - [1,2,3,4,5]         → "weekdays"
+ *  - [0,6]               → "weekends"
+ *  - anything else       → "Mon Tue …"
+ */
+function fmtDays(days: number[] | undefined): string {
+  if (!days || days.length === 0 || days.length === 7) return "every day";
+  const sorted = [...days].sort();
+  if (sorted.length === 5 && sorted.every((d, i) => d === i + 1)) return "weekdays";
+  if (sorted.length === 2 && sorted[0] === 0 && sorted[1] === 6) return "weekends";
+  return sorted.map((d) => DAY_LABELS[d]).join(" ");
+}
+
+redListDays.querySelectorAll<HTMLButtonElement>(".day-chip").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const pressed = btn.getAttribute("aria-pressed") === "true";
+    btn.setAttribute("aria-pressed", pressed ? "false" : "true");
+  });
+});
+
+document.querySelectorAll<HTMLButtonElement>(".day-preset").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const preset = btn.dataset.preset;
+    if (preset === "daily") setSelectedDays([0, 1, 2, 3, 4, 5, 6]);
+    else if (preset === "weekdays") setSelectedDays([1, 2, 3, 4, 5]);
+    else if (preset === "weekends") setSelectedDays([0, 6]);
+  });
+});
 
 function parseHM(value: string): { h: number; m: number } | null {
   // <input type="time"> emits "HH:MM" or "HH:MM:SS"
@@ -702,7 +756,9 @@ async function refreshRedList(): Promise<void> {
     .map((e) => {
       const w = e.windows[0];
       const label = e.label?.trim() || e.hostnamePattern;
-      const range = w ? `${fmtHM(w.startHour, w.startMinute)}–${fmtHM(w.endHour, w.endMinute)}` : "no window";
+      const range = w
+        ? `${fmtHM(w.startHour, w.startMinute)}–${fmtHM(w.endHour, w.endMinute)} · ${fmtDays(w.daysOfWeek)}`
+        : "no window";
       return `
         <div class="redlist-row" data-id="${escapeHtml(e.id)}" style="display:flex; align-items:center; gap:6px; padding:6px 0; border-top:1px solid var(--cream-dark);">
           <label class="switch" style="width:30px; height:18px; flex:0 0 auto;">
@@ -758,6 +814,7 @@ function resetRedListForm(): void {
   redListLabelInput.value = "";
   redListStartInput.value = "09:00";
   redListEndInput.value = "17:00";
+  setSelectedDays([0, 1, 2, 3, 4, 5, 6]);
 }
 
 redListCancelBtn.addEventListener("click", resetRedListForm);
@@ -775,6 +832,15 @@ redListSaveBtn.addEventListener("click", async () => {
     window.alert("Pick a valid start and end time.");
     return;
   }
+  const days = readSelectedDays();
+  if (days.length === 0) {
+    window.alert("Pick at least one day of the week.");
+    return;
+  }
+  // Drop the array when all 7 are selected — schedule.windowActive
+  // treats undefined as "every day", and storing the explicit array
+  // would just bloat the entry.
+  const daysOfWeek = days.length === 7 ? undefined : days;
   const entry: RedListEntry = {
     id: newRedListId(),
     hostnamePattern: hostname,
@@ -787,6 +853,7 @@ redListSaveBtn.addEventListener("click", async () => {
         startMinute: start.m,
         endHour: end.h,
         endMinute: end.m,
+        daysOfWeek,
       },
     ],
   };
