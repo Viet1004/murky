@@ -8,13 +8,7 @@
 
 // ---------- Server response types ----------
 
-export interface LayerInfo {
-  id: string;
-  url: string;
-  position: number;
-}
-
-/** v009+ generic asset shape — same data as LayerInfo, with role metadata. */
+/** Generic asset slot from the v009+ wire format. */
 export interface AssetInfo {
   id: string;
   role: string;
@@ -27,23 +21,18 @@ export interface AssetInfo {
 
 export interface ServerMask {
   id: string;
-  type: string; // "image-stack", future: "math-equation", etc.
+  type: string;
   display_name: string;
   description: string | null;
   config: Record<string, unknown>;
 
-  // v009+ render contract — present on every mask once migration 009 lands.
-  // The extension prefers these over `layers` and only falls back when
-  // `render_html` is missing (defensive against very old server versions).
-  version?: number;
-  behavior?: string;
-  render_html?: string | null;
-  assets?: AssetInfo[];
-
-  // Legacy field — flat image list, kept for one release while the
-  // old renderer phases out. The server populates it from role='layer'
-  // assets so old extensions keep working.
-  layers: LayerInfo[];
+  // v009+ render contract. The extension renders via render_html + behavior;
+  // assets carries the typed source data for any UI that needs to introspect
+  // (e.g. background's red-list picker filters role='layer').
+  version: number;
+  behavior: string;
+  render_html: string | null;
+  assets: AssetInfo[];
 }
 
 export interface CollectionDetail {

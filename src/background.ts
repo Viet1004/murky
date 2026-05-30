@@ -633,15 +633,20 @@ async function pickRedListMaskLayers(): Promise<string[]> {
   try {
     const col: CollectionDetail | null = await loadActiveCollection();
     if (col && col.masks.length > 0) {
-      const usable = col.masks.filter(
-        (m: ServerMask) => m.type === "image-stack" && m.layers.length > 0
-      );
+      // Pull image-stack masks that have at least one layer asset. We
+      // intentionally restrict to image-stack: the red-list overlay is the
+      // "stacked images" visual, not a flash-card or quote.
+      const usable = col.masks
+        .map((m: ServerMask) => {
+          const layers = (m.assets ?? [])
+            .filter((a) => a.role === "layer" && a.url)
+            .sort((a, b) => a.position - b.position)
+            .map((a) => a.url!) ;
+          return m.type === "image-stack" && layers.length > 0 ? layers : null;
+        })
+        .filter((x): x is string[] => x !== null);
       if (usable.length > 0) {
-        const pick = usable[Math.floor(Math.random() * usable.length)];
-        return pick.layers
-          .slice()
-          .sort((a, b) => a.position - b.position)
-          .map((l) => l.url);
+        return usable[Math.floor(Math.random() * usable.length)];
       }
     }
   } catch (err) {
