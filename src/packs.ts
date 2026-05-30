@@ -14,12 +14,35 @@ export interface LayerInfo {
   position: number;
 }
 
+/** v009+ generic asset shape — same data as LayerInfo, with role metadata. */
+export interface AssetInfo {
+  id: string;
+  role: string;
+  position: number;
+  url: string | null;
+  text_content: string | null;
+  mime: string | null;
+  meta?: Record<string, unknown>;
+}
+
 export interface ServerMask {
   id: string;
   type: string; // "image-stack", future: "math-equation", etc.
   display_name: string;
   description: string | null;
   config: Record<string, unknown>;
+
+  // v009+ render contract — present on every mask once migration 009 lands.
+  // The extension prefers these over `layers` and only falls back when
+  // `render_html` is missing (defensive against very old server versions).
+  version?: number;
+  behavior?: string;
+  render_html?: string | null;
+  assets?: AssetInfo[];
+
+  // Legacy field — flat image list, kept for one release while the
+  // old renderer phases out. The server populates it from role='layer'
+  // assets so old extensions keep working.
   layers: LayerInfo[];
 }
 

@@ -22,6 +22,8 @@ import {
   TwoLayerMaskFactory,
   BlurMaskFactory,
   ImageStackMaskFactory,
+  HtmlMaskFactory,
+  RENDERER_VERSION,
 } from "./masks";
 import { loadActiveCollection, CollectionDetail } from "./packs";
 import {
@@ -80,19 +82,34 @@ function buildRegistry(collection: CollectionDetail | null): MaskRegistry {
   const registry = new MaskRegistry("random");
 
   if (collection && collection.masks.length > 0) {
+    let renderHtmlCount = 0;
+    let legacyLayerCount = 0;
     for (const mask of collection.masks) {
+      // v009+ preferred path: server has compiled the mask to HTML + a behavior
+      // id. Use the generic HtmlMaskFactory regardless of mask.type — the
+      // type-specific logic lives entirely on the server compiler from here on.
+      if (mask.render_html && mask.behavior) {
+        registry.register(new HtmlMaskFactory(mask.render_html, mask.behavior));
+        renderHtmlCount += 1;
+        continue;
+      }
+      // Legacy fallback: server hasn't compiled (pre-009) OR the new fields
+      // got stripped en route. Use the type-specific factory we had before.
       if (mask.type === "image-stack" && mask.layers.length > 0) {
         const urls = mask.layers
           .sort((a, b) => a.position - b.position)
           .map((l) => l.url);
         registry.register(new ImageStackMaskFactory(urls));
+        legacyLayerCount += 1;
       }
-      // Future mask types go here:
-      // else if (mask.type === "math-equation") { ... }
+      // Future mask types without a legacy renderer just get skipped — they'll
+      // arrive via render_html once the server registers them.
     }
     if (registry.size > 0) {
       console.debug(
-        `[murky] using collection '${collection.slug}': ${collection.masks.length} masks`
+        `[murky] using collection '${collection.slug}' (renderer v${RENDERER_VERSION}): ` +
+          `${renderHtmlCount} via render_html, ${legacyLayerCount} via legacy layers, ` +
+          `${collection.masks.length} total`
       );
       return registry;
     }
