@@ -60,14 +60,6 @@ export interface LicenseInfo {
   source: string;
 }
 
-// Legacy types for /packs endpoint (backward compat)
-export interface PackSummary {
-  slug: string;
-  display_name: string;
-  description: string | null;
-  asset_count: number;
-}
-
 // ---------- Storage keys ----------
 
 const DEFAULT_SERVER_URL = "https://gum2fjwx5t.ap-southeast-1.awsapprunner.com";
@@ -302,11 +294,6 @@ export async function setLocalActiveSlug(slug: string | null): Promise<void> {
   });
 }
 
-// Legacy: list packs (for backward compat during transition)
-export async function listPacks(): Promise<PackSummary[]> {
-  const base = await getServerUrl();
-  return bgFetch<PackSummary[]>(`${base}/packs`);
-}
 
 /**
  * Returns the active collection, preferring the network and falling back
