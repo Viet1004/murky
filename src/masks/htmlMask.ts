@@ -1,3 +1,4 @@
+import { recordMaskReveal } from "../packs";
 import { BaseMask } from "./baseMask";
 import { activateBehavior, BehaviorHandle } from "./behaviors";
 import type { Mask, MaskContext, MaskFactory } from "./types";
@@ -18,11 +19,19 @@ import type { Mask, MaskContext, MaskFactory } from "./types";
  * <script> / on* attributes / etc. The extension trusts the bytes it
  * receives from the murky-server. (For user-authored html-snippet masks
  * the server runs nh3 + URL allowlist before storing.)
+ *
+ * "Consume on reveal": HtmlMask carries `maskId` and `collectionId` so
+ * when the behavior's reveal() fires we can also POST /me/masks/{id}/reveal,
+ * which drops this mask from the user's copy of the collection (see
+ * sql/011_mask_reveals.sql). Local fallback masks construct without IDs
+ * — empty strings disable the API call.
  */
 export class HtmlMask extends BaseMask {
   constructor(
     private readonly html: string,
-    private readonly behavior: string
+    private readonly behavior: string,
+    private readonly maskId: string,
+    private readonly collectionId: string
   ) {
     super();
   }
@@ -40,7 +49,15 @@ export class HtmlMask extends BaseMask {
       ?? host;  // fall back to host itself if compiler omitted the attribute
 
     const handle: BehaviorHandle = {
-      reveal: () => this.reveal(),
+      reveal: () => {
+        // Fire-and-forget the server-side consume call. Done before the
+        // local reveal so even if reveal() triggers DOM teardown that
+        // unmounts us, the network promise was already kicked off.
+        if (this.maskId && this.collectionId) {
+          void recordMaskReveal(this.maskId, this.collectionId);
+        }
+        this.reveal();
+      },
       recordInteraction: (label, payload) =>
         this.ctx?.onInteraction(label, payload),
     };
@@ -56,12 +73,14 @@ export class HtmlMaskFactory implements MaskFactory {
 
   constructor(
     private readonly html: string,
-    private readonly behavior: string
+    private readonly behavior: string,
+    private readonly maskId: string = "",
+    private readonly collectionId: string = ""
   ) {
     this.kind = `html:${behavior}`;
   }
 
   create(_ctx: MaskContext): Mask {
-    return new HtmlMask(this.html, this.behavior);
+    return new HtmlMask(this.html, this.behavior, this.maskId, this.collectionId);
   }
 }

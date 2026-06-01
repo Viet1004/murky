@@ -227,6 +227,42 @@ export async function acquireCollection(collectionId: string): Promise<LicenseIn
   }, headers);
 }
 
+/**
+ * Tell the server a mask was fully revealed in the given collection.
+ *
+ * Server-side this removes the mask from the user's copy of the
+ * collection (per sql/011_mask_reveals.sql) — the "unmask once, lose
+ * it" friction loop. Re-acquiring the collection restores it.
+ *
+ * Fire-and-forget: callers should NOT await the result on the hot
+ * path. Failures are logged at the bg layer; the local reveal animation
+ * proceeds regardless so a flaky network never breaks the UX. Anonymous
+ * users get a 401 here, which we swallow — without an account the
+ * server can't track per-user state anyway.
+ *
+ * Cache invalidation: we proactively drop the cached collection blob
+ * so the next page load re-fetches and the revealed mask drops out.
+ */
+export async function recordMaskReveal(
+  maskId: string,
+  collectionId: string
+): Promise<void> {
+  const base = await getServerUrl();
+  const headers = await authHeaders();
+  try {
+    await bgPost<unknown>(
+      `${base}/me/masks/${encodeURIComponent(maskId)}/reveal`,
+      { collection_id: collectionId },
+      headers
+    );
+    await new Promise<void>((resolve) => {
+      chrome.storage.local.remove(CACHE_KEY, () => resolve());
+    });
+  } catch (e) {
+    console.debug("[murky] recordMaskReveal failed (ignored)", e);
+  }
+}
+
 // ---------- Library + active-collection preference ----------
 
 export interface LibraryEntry {

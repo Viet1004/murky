@@ -94,7 +94,12 @@ function buildRegistry(collection: CollectionDetail | null): MaskRegistry {
         skipped += 1;
         continue;
       }
-      registry.register(new HtmlMaskFactory(mask.render_html, mask.behavior));
+      // mask.id + collection.id let HtmlMask fire POST /me/masks/{id}/reveal
+      // when the behavior's reveal() hook runs, so the server can drop this
+      // mask from the user's copy of the collection (see sql/011_mask_reveals).
+      registry.register(
+        new HtmlMaskFactory(mask.render_html, mask.behavior, mask.id, collection.id)
+      );
     }
     if (registry.size > 0) {
       console.debug(
