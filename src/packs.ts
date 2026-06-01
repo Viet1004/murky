@@ -243,10 +243,17 @@ export async function acquireCollection(collectionId: string): Promise<LicenseIn
  * Cache invalidation: we proactively drop the cached collection blob
  * so the next page load re-fetches and the revealed mask drops out.
  */
+export interface RevealResult {
+  /** The server recorded the reveal (or it's a free/owner mask). */
+  ok: boolean;
+  /** The server returned 402 — a paid collection with no unmask-credits left. */
+  paymentRequired: boolean;
+}
+
 export async function recordMaskReveal(
   maskId: string,
   collectionId: string
-): Promise<void> {
+): Promise<RevealResult> {
   const base = await getServerUrl();
   const headers = await authHeaders();
   try {
@@ -258,8 +265,16 @@ export async function recordMaskReveal(
     await new Promise<void>((resolve) => {
       chrome.storage.local.remove(CACHE_KEY, () => resolve());
     });
+    return { ok: true, paymentRequired: false };
   } catch (e) {
-    console.debug("[murky] recordMaskReveal failed (ignored)", e);
+    // The background worker surfaces non-2xx as "HTTP <status>: …". A 402 means
+    // the buyer is out of unmask-credits — the caller keeps the mask covered and
+    // prompts a purchase. Any other failure is treated as soft (don't block the
+    // reveal on a network blip).
+    const msg = e instanceof Error ? e.message : String(e);
+    const paymentRequired = msg.includes("402");
+    if (!paymentRequired) console.debug("[murky] recordMaskReveal failed (ignored)", e);
+    return { ok: false, paymentRequired };
   }
 }
 

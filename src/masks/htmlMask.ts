@@ -1,4 +1,4 @@
-import { recordMaskReveal } from "../packs";
+import { getServerUrl, recordMaskReveal } from "../packs";
 import { BaseMask } from "./baseMask";
 import { activateBehavior, BehaviorHandle } from "./behaviors";
 import type { Mask, MaskContext, MaskFactory } from "./types";
@@ -36,7 +36,13 @@ export class HtmlMask extends BaseMask {
     super();
   }
 
+  private mediaHost: HTMLDivElement | null = null;
+
   protected buildContent(host: HTMLDivElement): void {
+    // Remember the media area so we can restore the cover if a paid unmask is
+    // blocked (402) and we need to re-mask + show the purchase prompt.
+    this.mediaHost = host;
+
     // Drop the compiled HTML straight into the media area. The element's
     // outer wrapper carries `data-murky-behavior`; the activator finds it
     // and attaches handlers.
@@ -49,12 +55,17 @@ export class HtmlMask extends BaseMask {
       ?? host;  // fall back to host itself if compiler omitted the attribute
 
     const handle: BehaviorHandle = {
-      reveal: () => {
-        // Fire-and-forget the server-side consume call. Done before the
-        // local reveal so even if reveal() triggers DOM teardown that
-        // unmounts us, the network promise was already kicked off.
+      // Server-authorized reveal: for a paid collection the server spends an
+      // unmask-credit and returns 402 when the buyer is out. On 402 we keep the
+      // mask covered and prompt a purchase; otherwise (success, free/owner, or a
+      // soft network error) we complete the reveal so a blip never blocks it.
+      reveal: async () => {
         if (this.maskId && this.collectionId) {
-          void recordMaskReveal(this.maskId, this.collectionId);
+          const res = await recordMaskReveal(this.maskId, this.collectionId);
+          if (res.paymentRequired) {
+            this.showLocked();
+            return;
+          }
         }
         this.reveal();
       },
@@ -63,6 +74,68 @@ export class HtmlMask extends BaseMask {
     };
 
     activateBehavior(this.behavior, root, handle);
+  }
+
+  /** Out of unmask-credits: restore the cover and overlay a buy prompt. */
+  private showLocked(): void {
+    if (!this.mediaHost) {
+      return; // nothing to restore; leave the mask as-is rather than reveal free
+    }
+    // Re-mount the compiled HTML to restore the cover (undo the peel/flip).
+    this.buildContent(this.mediaHost);
+    this.mediaHost.style.position = this.mediaHost.style.position || "relative";
+
+    const overlay = document.createElement("div");
+    Object.assign(overlay.style, {
+      position: "absolute",
+      inset: "0",
+      zIndex: "50",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: "10px",
+      padding: "12px",
+      textAlign: "center",
+      background: "rgba(0,0,0,0.62)",
+      color: "#ffffff",
+      backdropFilter: "blur(2px)",
+    });
+
+    const msg = document.createElement("div");
+    msg.textContent = "Out of unlocks for this collection";
+    Object.assign(msg.style, { fontSize: "13px", fontWeight: "600", lineHeight: "1.3" });
+
+    const btn = document.createElement("button");
+    btn.textContent = "Get more";
+    Object.assign(btn.style, {
+      cursor: "pointer",
+      border: "none",
+      borderRadius: "9999px",
+      padding: "6px 16px",
+      fontSize: "13px",
+      fontWeight: "600",
+      color: "#ffffff",
+      background: "#f1641e",
+    });
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void this.openStore();
+    });
+
+    overlay.appendChild(msg);
+    overlay.appendChild(btn);
+    this.mediaHost.appendChild(overlay);
+  }
+
+  private async openStore(): Promise<void> {
+    try {
+      const base = await getServerUrl();
+      window.open(`${base}/browse`, "_blank", "noopener");
+    } catch {
+      // best-effort — nothing else to do if we can't resolve the server URL
+    }
   }
 }
 
