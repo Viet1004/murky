@@ -123,13 +123,15 @@ function buildRegistry(collection: CollectionDetail | null): MaskRegistry {
 }
 
 async function run(adapter: SiteAdapter, collection: CollectionDetail | null): Promise<void> {
-  const registry = buildRegistry(collection);
+  // `let` so we can rebuild the registry live when the active collection
+  // changes (see the murkyActivePack listener below).
+  let registry = buildRegistry(collection);
 
   // --- State ---
   let revealedCards = new Set<string>();
-  const processedCards = new WeakSet<HTMLElement>();
+  let processedCards = new WeakSet<HTMLElement>();
   const maskedCards: Set<HTMLElement> = new Set();
-  const cardMasks = new WeakMap<HTMLElement, Mask>();
+  let cardMasks = new WeakMap<HTMLElement, Mask>();
 
   // --- Scoring (decides which products to mask) ---
   // Load the scorer + profile + revealed-set BEFORE the first scan.
@@ -194,6 +196,38 @@ async function run(adapter: SiteAdapter, collection: CollectionDetail | null): P
       updateAllMasks();
     }
   });
+
+  // When the active collection changes (popup picker, browse "Activate", or
+  // sync), rebuild the registry and re-mask every card live — no page reload.
+  // Without this, an already-open shopping tab keeps the collection it loaded
+  // at page start, so switching collections appeared to do nothing.
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes.murkyActivePack) {
+      const next = (changes.murkyActivePack.newValue as string | undefined) ?? "(none)";
+      console.debug(`[murky] active collection changed → ${next}; reloading masks`);
+      void reloadCollection();
+    }
+  });
+
+  async function reloadCollection(): Promise<void> {
+    // Tear down the current masks.
+    for (const card of maskedCards) {
+      cardMasks.get(card)?.unmount();
+      card.classList.remove("murky-masked");
+    }
+    maskedCards.clear();
+    processedCards = new WeakSet();
+    cardMasks = new WeakMap();
+    // Rebuild from the now-active collection (or the local fallback).
+    let col: CollectionDetail | null = null;
+    try {
+      col = await loadActiveCollection();
+    } catch (e) {
+      console.warn("[murky] reload: collection fetch failed, using local fallback", e);
+    }
+    registry = buildRegistry(col);
+    await processAllCards();
+  }
 
   startCollector(adapter.siteId);
   void initBehaviorCollector(adapter.siteId);
